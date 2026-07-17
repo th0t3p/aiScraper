@@ -77,6 +77,9 @@ class Normalizer:
         Example input::
 
             Host: example.com\r\nContent-Type: application/json\r\n\r\n
+
+        Duplicate header names (e.g. multiple Set-Cookie) are merged with
+        "; " separator to avoid silent data loss.
         """
         result: dict[str, str] = {}
         if not raw_headers:
@@ -88,7 +91,13 @@ class Normalizer:
             if ":" not in line:
                 continue  # malformed line, skip
             key, _, value = line.partition(":")
-            result[key.strip().lower()] = value.strip()
+            key = key.strip().lower()
+            value = value.strip()
+            if key in result:
+                # Merge duplicate headers (e.g. Set-Cookie)
+                result[key] = result[key] + "; " + value
+            else:
+                result[key] = value
         return result
 
     @staticmethod

@@ -79,7 +79,7 @@ class TestPollerCursor:
             "getProxyHistory": [raw1.model_dump(), raw2.model_dump()],
         })
 
-        config = PollerConfig(cursor_mode="by_id", proxy_history_tool="getProxyHistory")
+        config = PollerConfig(cursor_mode="by_id", proxy_history_tool="getProxyHistory", allow_unscoped=True)
         poller = BurpPoller(config=config, mcp_client=fake)
 
         records = await poller.poll_once()
@@ -106,7 +106,7 @@ class TestPollerCursor:
             "getProxyHistory": [raw.model_dump()],
         })
 
-        config = PollerConfig(cursor_mode="by_id", proxy_history_tool="getProxyHistory")
+        config = PollerConfig(cursor_mode="by_id", proxy_history_tool="getProxyHistory", allow_unscoped=True)
         poller = BurpPoller(config=config, mcp_client=fake)
 
         # First poll
@@ -128,7 +128,7 @@ class TestPollerCursor:
             "getProxyHistory": [raw1.model_dump(), raw2.model_dump(), raw3.model_dump()],
         })
 
-        config = PollerConfig(cursor_mode="by_id", proxy_history_tool="getProxyHistory")
+        config = PollerConfig(cursor_mode="by_id", proxy_history_tool="getProxyHistory", allow_unscoped=True)
         poller = BurpPoller(config=config, mcp_client=fake)
 
         # First poll: all 3 are new
@@ -161,6 +161,7 @@ class TestPollerUrlFiltering:
         config = PollerConfig(
             cursor_mode="by_id",
             include_url_patterns=[r"include\.com"],
+            allow_unscoped=True,
             proxy_history_tool="getProxyHistory",
         )
         poller = BurpPoller(config=config, mcp_client=fake)
@@ -181,6 +182,7 @@ class TestPollerUrlFiltering:
         config = PollerConfig(
             cursor_mode="by_id",
             exclude_url_patterns=[r"drop\.com"],
+            allow_unscoped=True,
             proxy_history_tool="getProxyHistory",
         )
         poller = BurpPoller(config=config, mcp_client=fake)
@@ -202,6 +204,7 @@ class TestPollerUrlFiltering:
             cursor_mode="by_id",
             include_url_patterns=[r"target\.com"],
             exclude_url_patterns=[r"/admin/"],
+            allow_unscoped=True,
             proxy_history_tool="getProxyHistory",
         )
         poller = BurpPoller(config=config, mcp_client=fake)
@@ -250,7 +253,8 @@ class TestPollerAuthorizedScope:
         assert len(records) == 0
 
     @pytest.mark.asyncio
-    async def test_empty_scope_allows_all(self):
+    async def test_empty_scope_drops_all_by_default(self):
+        """Fail-closed: empty scope + allow_unscoped=False → all dropped."""
         raw = _make_raw(id=1, host="random.com")
 
         fake = FakeMcpClient(tool_responses={
@@ -259,7 +263,28 @@ class TestPollerAuthorizedScope:
 
         config = PollerConfig(
             cursor_mode="by_id",
-            authorized_scope=[],  # empty = allow all
+            authorized_scope=[],  # empty = fail-closed
+            allow_unscoped=False,
+            proxy_history_tool="getProxyHistory",
+        )
+        poller = BurpPoller(config=config, mcp_client=fake)
+        records = await poller.poll_once()
+
+        assert len(records) == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_scope_allow_unscoped_passes_all(self):
+        """allow_unscoped=True restores old behavior: empty scope passes all."""
+        raw = _make_raw(id=1, host="random.com")
+
+        fake = FakeMcpClient(tool_responses={
+            "getProxyHistory": [raw.model_dump()],
+        })
+
+        config = PollerConfig(
+            cursor_mode="by_id",
+            authorized_scope=[],
+            allow_unscoped=True,
             proxy_history_tool="getProxyHistory",
         )
         poller = BurpPoller(config=config, mcp_client=fake)
@@ -284,7 +309,7 @@ class TestPollerCallbacks:
         async def my_callback(records):
             received.extend(records)
 
-        config = PollerConfig(cursor_mode="by_id", proxy_history_tool="getProxyHistory")
+        config = PollerConfig(cursor_mode="by_id", proxy_history_tool="getProxyHistory", allow_unscoped=True)
         poller = BurpPoller(config=config, mcp_client=fake)
         poller.on_new_records(my_callback)
 
@@ -336,3 +361,69 @@ class TestPollerParseRecords:
         poller = BurpPoller(config=config)
         records = poller._parse_records([])
         assert records == []
+
+
+class TestCursorAdvancementWithFilters:
+    """Regression: cursor must advance even when url/scope filters drop all records."""
+
+    @pytest.mark.asyncio
+    async def test_cursor_advances_when_scope_filters_drop_all(self):
+        """Even if authorized_scope drops every record, the cursor must still advance."""
+        # 3 records: only id=1 is in scope, but ids 2 and 3 are NOT
+        raw1 = _make_raw(id=1, host="evil.com", path="/a")
+        raw2 = _make_raw(id=2, host="evil.com", path="/b")
+        raw3 = _make_raw(id=3, host="evil.com", path="/c")
+
+        fake = FakeMcpClient(tool_responses={
+            "getProxyHistory": [raw1.model_dump(), raw2.model_dump(), raw3.model_dump()],
+        })
+
+        config = PollerConfig(
+            cursor_mode="by_id",
+            authorized_scope=["*.example.com"],  # none match evil.com
+            proxy_history_tool="getProxyHistory",
+        )
+        poller = BurpPoller(config=config, mcp_client=fake)
+
+        records = await poller.poll_once()
+
+        # All 3 records dropped by scope filter
+        assert len(records) == 0
+
+        # Cursor must still advance past the max id in this batch (3)
+        state = poller.get_state()
+        assert state.last_seen_id == 3, (
+            f"Cursor should advance to 3 even though all records were filtered, "
+            f"got last_seen_id={state.last_seen_id}"
+        )
+        assert state.total_polled == 3
+
+    @pytest.mark.asyncio
+    async def test_cursor_advances_when_only_some_pass_filters(self):
+        """Cursor advances past all records; only authorized ones are returned."""
+        raw1 = _make_raw(id=10, host="in.example.com", path="/a")
+        raw2 = _make_raw(id=20, host="out.com", path="/b")
+        raw3 = _make_raw(id=30, host="in.example.com", path="/c")
+
+        fake = FakeMcpClient(tool_responses={
+            "getProxyHistory": [raw1.model_dump(), raw2.model_dump(), raw3.model_dump()],
+        })
+
+        config = PollerConfig(
+            cursor_mode="by_id",
+            authorized_scope=["*.example.com"],
+            proxy_history_tool="getProxyHistory",
+        )
+        poller = BurpPoller(config=config, mcp_client=fake)
+
+        records = await poller.poll_once()
+
+        # Only records from in.example.com pass scope
+        assert len(records) == 2
+        hosts = {r.host for r in records}
+        assert hosts == {"in.example.com"}
+
+        # Cursor must advance past max id (30), not just filtered records
+        state = poller.get_state()
+        assert state.last_seen_id == 30
+        assert state.total_polled == 3

@@ -205,21 +205,28 @@ class BurpPoller:
         # 3. Apply cursor filtering (safety net in case the tool doesn't support it)
         records = self._apply_cursor_filter(records)
         if not records:
-            logger.debug("All %d records already seen (cursor filter)", len(raw_data) if isinstance(raw_data, list) else 0)
+            logger.debug("No new records beyond cursor in this poll cycle")
             return []
 
-        # 4. Apply regex filters
-        records = self._apply_url_filters(records)
-
-        # 5. Validate authorized scope
-        records = self._validate_authorized_scope(records)
-
-        # 6. Update cursor
+        # 4. Advance cursors NOW — BEFORE url/scope filtering.
+        #    This prevents the poller from getting stuck when all new records
+        #    happen to be excluded by url/scope filters.
+        cursor_advanced = len(records)
         self._update_cursor(records)
-        self._state.total_polled += len(records)
+        self._state.total_polled += cursor_advanced
         self._state.last_poll_at = datetime.now(timezone.utc)
 
-        logger.info("Polled %d new records (total=%d)", len(records), self._state.total_polled)
+        # 5. Apply regex filters (post-cursor — safe to drop here)
+        records = self._apply_url_filters(records)
+
+        # 6. Validate authorized scope (post-cursor — safe to drop here)
+        records = self._validate_authorized_scope(records)
+
+        passed_through = len(records)
+        logger.info(
+            "Polled %d new records (cursor advanced); %d passed filters (total cursor=%d)",
+            cursor_advanced, passed_through, self._state.total_polled,
+        )
 
         # 7. Notify callbacks
         for cb in self._callbacks:
@@ -347,11 +354,23 @@ class BurpPoller:
     def _validate_authorized_scope(self, records: list[RawBurpRecord]) -> list[RawBurpRecord]:
         """Drop records whose host is not in the authorized_scope whitelist.
 
-        If authorized_scope is empty, all records pass through.
+        Fail-closed by default: if authorized_scope is empty, ALL records are
+        dropped unless allow_unscoped is explicitly set to True.
         """
         scopes = self._config.authorized_scope
         if not scopes:
-            return records
+            if self._config.allow_unscoped:
+                logger.warning(
+                    "authorized_scope is empty and allow_unscoped=True — "
+                    "ALL traffic is being accepted without scope validation. "
+                    "Set authorized_scope for production use."
+                )
+                return records
+            logger.warning(
+                "authorized_scope is empty — all traffic will be dropped "
+                "until configured. Set authorized_scope in your config."
+            )
+            return []
 
         result: list[RawBurpRecord] = []
         for r in records:

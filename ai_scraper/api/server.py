@@ -38,14 +38,35 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=api_config.cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS — validate dangerous combinations
+    origins = api_config.cors_origins
+    if "*" in origins and len(origins) > 1:
+        logger.error(
+            "CORS misconfiguration: allow_origins contains '*' alongside other origins. "
+            "This is invalid — '*' must be the sole origin when used."
+        )
+    if "*" in origins:
+        # When allow_credentials=True, allow_origins=["*"] is a CORS spec violation.
+        # Browsers will reject the response. Force allow_credentials=False for safety.
+        logger.warning(
+            "CORS: allow_origins=['*'] is incompatible with allow_credentials=True. "
+            "Forcing allow_credentials=False. To use credentials, specify explicit origins."
+        )
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    else:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=bool(origins),  # only allow credentials if explicit origins are set
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # Routes
     app.include_router(router)

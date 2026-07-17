@@ -6,14 +6,47 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from ai_scraper.config import get_config
 from ai_scraper.service import AiScraperService, get_service
 from ai_scraper.storage.models import TrafficQuery, TrafficQueryResult, TrafficStats
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1", tags=["traffic"])
+
+# ── API Key Auth ─────────────────────────────────────────────────────────────
+
+def verify_api_key(request: Request) -> None:
+    """FastAPI dependency: validate X-API-Key header against configured api_key.
+
+    If api_key is not configured, a WARNING is logged once but all requests
+    are allowed through (for local development convenience).
+    """
+    config = get_config()
+    expected = config.api.api_key
+    if expected is None:
+        # Log once per process start — use a module-level flag
+        if not getattr(verify_api_key, "_warned", False):
+            logger.warning(
+                "API key not set — all endpoints are unauthenticated. "
+                "Set AI_SCRAPER__API__API_KEY in your environment."
+            )
+            verify_api_key._warned = True  # type: ignore[attr-defined]
+        return
+
+    provided = request.headers.get("X-API-Key") or request.headers.get("x-api-key")
+    if not provided:
+        raise HTTPException(status_code=401, detail="Missing X-API-Key header")
+    if provided != expected:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+router = APIRouter(
+    prefix="/api/v1",
+    tags=["traffic"],
+    dependencies=[Depends(verify_api_key)],
+)
 
 
 # ── Traffic Query ────────────────────────────────────────────────────────────

@@ -37,6 +37,8 @@ class PollerConfig(BaseModel):
     exclude_url_patterns: list[str] = Field(default_factory=list)
     # 授权范围白名单（域名 glob 模式，如 *.example.com）
     authorized_scope: list[str] = Field(default_factory=list)
+    # 仅当为 True 时才允许空 authorized_scope 放行所有流量（仅限本地测试）
+    allow_unscoped: bool = False
     # Burp MCP 工具名（如果实际部署不同可覆盖）
     proxy_history_tool: str = "getProxyHistory"
     request_content_tool: str = "getRequest"
@@ -86,7 +88,8 @@ class EnrichmentConfig(BaseModel):
 class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8700
-    cors_origins: list[str] = Field(default_factory=lambda: ["*"])
+    cors_origins: list[str] = Field(default_factory=list)  # default: deny all cross-origin
+    api_key: Optional[str] = None  # if set, X-API-Key header is required
 
 
 # ── Root Config ───────────────────────────────────────────────────────────────

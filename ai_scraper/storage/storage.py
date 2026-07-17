@@ -79,7 +79,7 @@ class PostgresStorage:
     # ── Write ────────────────────────────────────────────────────────────────
 
     async def save(self, records: list[TrafficRecord]) -> int:
-        """Insert or update records. Returns count of newly inserted rows."""
+        """Insert or update records using batch executemany. Returns count written."""
         if not records:
             return 0
         assert self._pool is not None
@@ -98,16 +98,14 @@ class PostgresStorage:
             timestamp         = EXCLUDED.timestamp
         """
 
-        inserted = 0
+        params_list = [self._record_to_params(r) for r in records]
+
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                for r in records:
-                    result = await conn.execute(sql, *self._record_to_params(r))
-                    # execute returns "INSERT 0 1" — we count attempts > 0
-                    inserted += 1
+                await conn.executemany(sql, params_list)
 
-        logger.debug("Saved %d records to PostgreSQL", inserted)
-        return inserted
+        logger.debug("Saved %d records to PostgreSQL (batch)", len(records))
+        return len(records)
 
     # ── Query ────────────────────────────────────────────────────────────────
 
