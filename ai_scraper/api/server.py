@@ -1,0 +1,71 @@
+"""FastAPI application factory."""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from ai_scraper.api.routes import router
+from ai_scraper.config import ApiConfig, get_config
+from ai_scraper.service import AiScraperService, init_service, shutdown_service
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup / shutdown lifecycle for the FastAPI app."""
+    # Startup
+    logger.info("Starting AI Scraper service...")
+    await init_service()
+    yield
+    # Shutdown
+    logger.info("Shutting down AI Scraper service...")
+    await shutdown_service()
+
+
+def create_app(config: ApiConfig | None = None) -> FastAPI:
+    """Build and return a configured FastAPI application."""
+    api_config = config or get_config().api
+
+    app = FastAPI(
+        title="AI Scraper",
+        description="Burp Suite proxy traffic ingestion & normalization service for bug bounty orchestration",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    # CORS
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=api_config.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Routes
+    app.include_router(router)
+
+    return app
+
+
+def run_server() -> None:
+    """Entry point for `python -m ai_scraper.api.server`."""
+    import uvicorn
+
+    config = get_config()
+    uvicorn.run(
+        "ai_scraper.api.server:create_app",
+        host=config.api.host,
+        port=config.api.port,
+        reload=config.debug,
+        factory=True,
+    )
+
+
+if __name__ == "__main__":
+    run_server()

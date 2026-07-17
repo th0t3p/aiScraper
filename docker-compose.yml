@@ -1,0 +1,64 @@
+# ── AI Scraper docker-compose ────────────────────────────────────────────────
+# Start:   docker-compose up -d
+# Stop:    docker-compose down
+# Logs:    docker-compose logs -f ai-scraper
+#
+# Notes:
+#   - PostgreSQL runs as a sibling service
+#   - Burp MCP Server must be running on the host at http://127.0.0.1:9876
+#   - The container accesses it via host.docker.internal
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-scraper-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: scraper_secret
+      POSTGRES_DB: bugbounty
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bugbounty"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  ai-scraper:
+    build: .
+    container_name: ai-scraper-app
+    restart: unless-stopped
+    ports:
+      - "8700:8700"
+    environment:
+      # PostgreSQL — connect to the sibling service
+      AI_SCRAPER__POSTGRES__HOST: postgres
+      AI_SCRAPER__POSTGRES__PORT: "5432"
+      AI_SCRAPER__POSTGRES__DATABASE: bugbounty
+      AI_SCRAPER__POSTGRES__USER: postgres
+      AI_SCRAPER__POSTGRES__PASSWORD: scraper_secret
+
+      # Burp MCP Server — running on the host machine
+      AI_SCRAPER__POLLER__MCP_SSE_URL: http://host.docker.internal:9876
+      AI_SCRAPER__POLLER__POLL_INTERVAL_SECONDS: "30"
+
+      # API
+      AI_SCRAPER__API__HOST: "0.0.0.0"
+      AI_SCRAPER__API__PORT: "8700"
+
+      # Debug
+      AI_SCRAPER__DEBUG: "false"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  pgdata:
