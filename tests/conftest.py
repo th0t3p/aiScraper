@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from ai_scraper.poller.models import RawBurpRecord, CursorMode, PollerState
 from ai_scraper.normalizer.models import TrafficRecord
-from ai_scraper.poller.burp_mcp_client import McpSseClient
+from burp_mcp_client import McpSseClient
 
 
 # ── Sample raw Burp records ──────────────────────────────────────────────────

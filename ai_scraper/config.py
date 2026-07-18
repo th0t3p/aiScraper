@@ -47,6 +47,12 @@ class PollerConfig(BaseModel):
     batch_size: int = 200
     # MCP 请求超时（秒）
     request_timeout: float = 30.0
+    # ── McpSseClient constructor extras ─────────────────────────────────────
+    # SSE endpoint path on the MCP server (official PortSwigger: "/sse",
+    # BurpMCP-Ultra: "/")
+    mcp_sse_path: str = "/sse"
+    # Optional Bearer token for BurpMCP-Ultra Authorization header
+    mcp_auth_token: Optional[str] = None
 
 
 # ── Deduplicator ──────────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable, List, Optional
 
 from ai_scraper.config import PollerConfig, get_config
-from ai_scraper.poller.burp_mcp_client import McpSseClient
+from burp_mcp_client import McpSseClient
 from ai_scraper.poller.models import CursorMode, PollerState, RawBurpRecord
 
 logger = logging.getLogger(__name__)
@@ -64,10 +64,7 @@ class BurpPoller:
         if self._running:
             return
         self._running = True
-        self._client = self._mcp_client or McpSseClient(
-            base_url=self._config.mcp_sse_url,
-            timeout=self._config.request_timeout,
-        )
+        self._client = self._mcp_client or self._build_mcp_client()
         await self._client.connect()
         await self._discover_proxy_tool()
         logger.info(
@@ -96,10 +93,7 @@ class BurpPoller:
     async def poll_once(self) -> list[RawBurpRecord]:
         """Execute a single poll immediately.  Does not require start()."""
         if self._client is None:
-            self._client = self._mcp_client or McpSseClient(
-                base_url=self._config.mcp_sse_url,
-                timeout=self._config.request_timeout,
-            )
+            self._client = self._mcp_client or self._build_mcp_client()
             await self._client.connect()
 
         try:
@@ -173,6 +167,19 @@ class BurpPoller:
         logger.info("No proxy history tool auto-detected, using configured: '%s'",
                      self._config.proxy_history_tool)
         return self._config.proxy_history_tool
+
+    def _build_mcp_client(self) -> McpSseClient:
+        """Construct an McpSseClient from the current config."""
+        kwargs: dict[str, Any] = dict(
+            base_url=self._config.mcp_sse_url,
+            timeout=self._config.request_timeout,
+            sse_path=self._config.mcp_sse_path,
+        )
+        if self._config.mcp_auth_token:
+            kwargs["headers"] = {
+                "Authorization": f"Bearer {self._config.mcp_auth_token}"
+            }
+        return McpSseClient(**kwargs)
 
     # ── Internals ────────────────────────────────────────────────────────────
 
