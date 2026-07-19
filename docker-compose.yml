@@ -37,8 +37,8 @@ services:
     container_name: ai-scraper-app
     restart: unless-stopped
     # Uncomment to expose the API to the host (security risk — prefer docker network):
-    # ports:
-    #   - "8700:8700"
+    ports:
+      - "8700:8700"
     environment:
       # PostgreSQL — connect to the sibling service
       AI_SCRAPER__POSTGRES__HOST: postgres
@@ -53,7 +53,7 @@ services:
 
       # API — binds to 127.0.0.1 by default (no external access)
       # Change to 0.0.0.0 ONLY if you need external access and understand the risk
-      AI_SCRAPER__API__HOST: "127.0.0.1"
+      AI_SCRAPER__API__HOST: "0.0.0.0"
       AI_SCRAPER__API__PORT: "8700"
       AI_SCRAPER__API__API_KEY: ${AI_SCRAPER__API__API_KEY:-}
 

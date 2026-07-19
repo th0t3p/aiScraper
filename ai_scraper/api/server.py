@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from ai_scraper.api.routes import router
+from ai_scraper.api.routes import router, health_router
 from ai_scraper.config import ApiConfig, get_config
 from ai_scraper.service import AiScraperService, init_service, shutdown_service
 
@@ -70,6 +70,7 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
 
     # Routes
     app.include_router(router)
+    app.include_router(health_router)
 
     return app
 

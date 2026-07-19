@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ai_scraper.api.routes import router
+from ai_scraper.api.routes import router, health_router
 from ai_scraper.service import get_service
 from ai_scraper.normalizer.models import TrafficRecord
 from ai_scraper.storage.models import TrafficQueryResult, TrafficStats
-from ai_scraper.config import ApiConfig, AppConfig, set_config
+from ai_scraper.config import ApiConfig, AppConfig, get_config, set_config
 from datetime import datetime, timezone
 
 
@@ -42,6 +42,7 @@ def client(mock_service):
     """
     app = FastAPI()
     app.include_router(router)
+    app.include_router(health_router)
     app.dependency_overrides[get_service] = lambda: mock_service
     with TestClient(app, headers={"X-API-Key": "test-api-key"}) as c:
         yield c
@@ -56,6 +57,7 @@ def unauth_client(mock_service):
     """
     app = FastAPI()
     app.include_router(router)
+    app.include_router(health_router)
     app.dependency_overrides[get_service] = lambda: mock_service
     with TestClient(app) as c:
         yield c
@@ -189,25 +191,52 @@ class TestAuth:
     """
 
     def test_missing_key_returns_401(self, unauth_client):
-        response = unauth_client.get("/api/v1/health")
+        response = unauth_client.get("/api/v1/state")
         assert response.status_code == 401
         assert "Missing X-API-Key" in response.json()["detail"]
 
     def test_wrong_key_returns_401(self, mock_service):
         app = FastAPI()
         app.include_router(router)
+        app.include_router(health_router)
         app.dependency_overrides[get_service] = lambda: mock_service
         with TestClient(app, headers={"X-API-Key": "wrong-key"}) as c:
-            response = c.get("/api/v1/health")
+            response = c.get("/api/v1/state")
             assert response.status_code == 401
             assert "Invalid API key" in response.json()["detail"]
 
     def test_correct_key_passes_through(self, client):
-        response = client.get("/api/v1/health")
+        response = client.get("/api/v1/state")
         assert response.status_code == 200
 
     def test_no_key_required_when_api_key_is_none(self, unauth_client):
-        """When api_key is None, all requests should pass through."""
-        set_config(AppConfig(api=ApiConfig(api_key=None)))
+        """When api_key is None, all authenticated endpoints pass through."""
+        original = get_config()
+        try:
+            set_config(AppConfig(api=ApiConfig(api_key=None)))
+            response = unauth_client.get("/api/v1/state")
+            assert response.status_code == 200
+        finally:
+            set_config(original)
+
+    def test_health_always_open(self, unauth_client):
+        """Health endpoint must return 200 without auth even when api_key is set.
+
+        Docker HEALTHCHECK has no mechanism to supply an X-API-Key header,
+        so /health is intentionally outside the authenticated router.
+        """
         response = unauth_client.get("/api/v1/health")
         assert response.status_code == 200
+        data = response.json()
+        assert "status" in data
+        assert "mcp_connected" in data
+
+    def test_state_still_requires_auth(self, unauth_client):
+        """Regression guard: /state must remain behind auth.
+
+        /health was the only endpoint moved to the unauthenticated router.
+        If /state ever stops returning 401 here, someone accidentally
+        moved it out of the authenticated router.
+        """
+        response = unauth_client.get("/api/v1/state")
+        assert response.status_code == 401

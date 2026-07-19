@@ -42,10 +42,20 @@ def verify_api_key(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+# ── Authenticated router — all endpoints except /health ──────────────────────
+
 router = APIRouter(
     prefix="/api/v1",
     tags=["traffic"],
     dependencies=[Depends(verify_api_key)],
+)
+
+# ── Unauthenticated health router — must not require X-API-Key because
+#    Docker HEALTHCHECK and load balancers have no way to supply one.
+
+health_router = APIRouter(
+    prefix="/api/v1",
+    tags=["health"],
 )
 
 
@@ -134,11 +144,19 @@ async def trigger_poll(
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
-@router.get("/health")
+@health_router.get("/health")
 async def health(
     service: AiScraperService = Depends(get_service),
 ):
-    """Health check — includes Burp MCP connectivity status."""
+    """Health check — includes Burp MCP connectivity status.
+
+    This endpoint is intentionally unauthenticated — Docker HEALTHCHECK
+    and load balancers have no mechanism to supply an X-API-Key header.
+    The response body is limited to status + mcp_connected boolean
+    specifically so nothing sensitive is exposed here.  If this endpoint
+    ever grows to include anything more detailed, revisit the decision
+    to keep it outside the authenticated router.
+    """
     mcp_ok = False
     try:
         # Quick connectivity check by polling once (will fail fast if MCP is down)
