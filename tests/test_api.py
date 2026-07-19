@@ -12,6 +12,7 @@ from ai_scraper.api.routes import router
 from ai_scraper.service import get_service
 from ai_scraper.normalizer.models import TrafficRecord
 from ai_scraper.storage.models import TrafficQueryResult, TrafficStats
+from ai_scraper.config import ApiConfig, AppConfig, set_config
 from datetime import datetime, timezone
 
 
@@ -34,7 +35,25 @@ def mock_service():
 
 @pytest.fixture
 def client(mock_service):
-    """Create a TestClient with mocked service — bypasses lifespan/PostgreSQL."""
+    """Create a TestClient with mocked service — bypasses lifespan/PostgreSQL.
+
+    Includes the correct X-API-Key header matching the autouse config fixture
+    in conftest.py, so tests exercise the real auth path.
+    """
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_service] = lambda: mock_service
+    with TestClient(app, headers={"X-API-Key": "test-api-key"}) as c:
+        yield c
+
+
+@pytest.fixture
+def unauth_client(mock_service):
+    """TestClient that does NOT send an X-API-Key header.
+
+    Used by auth tests to verify that requests without the correct key
+    are rejected.
+    """
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_service] = lambda: mock_service
@@ -159,3 +178,36 @@ class TestPollEndpoint:
         mock_service.run_once.side_effect = RuntimeError("MCP unreachable")
         response = client.post("/api/v1/traffic/poll")
         assert response.status_code == 500
+
+
+class TestAuth:
+    """Verify that the verify_api_key dependency actually enforces auth.
+
+    These tests exist because the entire auth path was previously
+    untested — requests were silently succeeding or failing depending
+    on whether the developer's disk had a .env with an api_key set.
+    """
+
+    def test_missing_key_returns_401(self, unauth_client):
+        response = unauth_client.get("/api/v1/health")
+        assert response.status_code == 401
+        assert "Missing X-API-Key" in response.json()["detail"]
+
+    def test_wrong_key_returns_401(self, mock_service):
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[get_service] = lambda: mock_service
+        with TestClient(app, headers={"X-API-Key": "wrong-key"}) as c:
+            response = c.get("/api/v1/health")
+            assert response.status_code == 401
+            assert "Invalid API key" in response.json()["detail"]
+
+    def test_correct_key_passes_through(self, client):
+        response = client.get("/api/v1/health")
+        assert response.status_code == 200
+
+    def test_no_key_required_when_api_key_is_none(self, unauth_client):
+        """When api_key is None, all requests should pass through."""
+        set_config(AppConfig(api=ApiConfig(api_key=None)))
+        response = unauth_client.get("/api/v1/health")
+        assert response.status_code == 200

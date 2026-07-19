@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  secrets-check:
+    name: "No secrets in diff"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "Reject if .env appears in any commit reachable from this PR"
+        run: |
+          # Fail if .env (or any common credential filename) is in the diff.
+          # .env.example is explicitly allowed and is the only .env-pattern
+          # file that should ever be committed.
+          if git diff --name-only "origin/main...HEAD" | grep -E '(^|/)\.env$'; then
+            echo "::error::.env file detected in PR diff — this file must never be committed"
+            exit 1
+          fi
+
+          # Scan for other common secret-bearing files
+          PATTERNS='\.pem$|\.key$|credentials\.json$|secret.*\.ya?ml$|\.env\..*'
+          if git diff --name-only "origin/main...HEAD" | grep -v '.env.example' | grep -E "$PATTERNS"; then
+            echo "::error::Potential credential file detected in PR diff"
+            exit 1
+          fi
+
+          echo "✓ No credential files found in diff"
+
+  tests:
+    name: "Tests (Python ${{ matrix.python-version }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ".[dev]"
+
+      - name: Run tests
+        run: python -m pytest tests/ -v

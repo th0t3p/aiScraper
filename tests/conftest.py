@@ -6,9 +6,28 @@ import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+from ai_scraper.config import AppConfig, ApiConfig, set_config
 from ai_scraper.poller.models import RawBurpRecord, CursorMode, PollerState
 from ai_scraper.normalizer.models import TrafficRecord
 from burp_mcp_client import McpSseClient
+
+
+# ── Config isolation ──────────────────────────────────────────────────────────
+
+@pytest.fixture(scope="session", autouse=True)
+def _pin_test_config():
+    """Override the global AppConfig before any test runs.
+
+    Without this, tests would silently pick up whatever .env is sitting on
+    the developer's disk — meaning test behaviour changes depending on who
+    is running them and what their local environment looks like.
+
+    The api_key is set to a known value so the auth path is exercised in
+    API tests rather than bypassed when api_key=None.
+    """
+    set_config(AppConfig(
+        api=ApiConfig(api_key="test-api-key"),
+    ))
 
 
 # ── Sample raw Burp records ──────────────────────────────────────────────────
