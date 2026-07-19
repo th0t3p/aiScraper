@@ -6,20 +6,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for asyncpg
+# Install system dependencies:
+#   libpq-dev + gcc → required to build asyncpg
+#   git              → required to resolve the git+https:// dependency in pyproject.toml
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc \
+    libpq-dev gcc git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# NOTE: All Python dependencies are now sourced entirely from pyproject.toml.
+# Do NOT hardcode a separate pip install list here — use `pip install .` only.
 COPY pyproject.toml .
-RUN pip install --no-cache-dir \
-    httpx pydantic pydantic-settings asyncpg \
-    fastapi "uvicorn[standard]" apscheduler \
-    && pip cache purge
-
-# Copy application code
 COPY ai_scraper/ ai_scraper/
+RUN pip install --no-cache-dir .
 
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash scraper \
