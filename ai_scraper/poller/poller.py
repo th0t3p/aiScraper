@@ -175,10 +175,11 @@ class BurpPoller:
             timeout=self._config.request_timeout,
             sse_path=self._config.mcp_sse_path,
         )
+        headers: dict[str, str] = dict(self._config.mcp_extra_headers)
         if self._config.mcp_auth_token:
-            kwargs["headers"] = {
-                "Authorization": f"Bearer {self._config.mcp_auth_token}"
-            }
+            headers["Authorization"] = f"Bearer {self._config.mcp_auth_token}"
+        if headers:
+            kwargs["headers"] = headers
         return McpSseClient(**kwargs)
 
     # ── Internals ────────────────────────────────────────────────────────────

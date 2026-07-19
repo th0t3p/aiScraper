@@ -136,6 +136,7 @@ reachable by anything other than you.
 | `poller` | `mcp_sse_url` | `http://127.0.0.1:9876` | |
 | `poller` | `mcp_sse_path` | `/sse` | Set to `/` for BurpMCP-Ultra |
 | `poller` | `mcp_auth_token` | `None` | Bearer token, needed for BurpMCP-Ultra |
+| `poller` | `mcp_extra_headers` | `{}` | Extra HTTP headers on every MCP request (e.g. Host/Origin overrides for Docker DNS rebinding) |
 | `poller` | `poll_interval_seconds` | `30` | |
 | `poller` | `authorized_scope` | `[]` (fail-closed) | Glob patterns |
 | `poller` | `allow_unscoped` | `false` | Explicit opt-out of fail-closed behavior |

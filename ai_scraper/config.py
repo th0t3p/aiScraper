@@ -53,6 +53,12 @@ class PollerConfig(BaseModel):
     mcp_sse_path: str = "/sse"
     # Optional Bearer token for BurpMCP-Ultra Authorization header
     mcp_auth_token: Optional[str] = None
+    # Arbitrary extra HTTP headers sent on every MCP request (SSE and RPC POST).
+    # Useful for satisfying Burp MCP Server's Host/Origin validation when
+    # connecting from a different network context, e.g. Docker's
+    # host.docker.internal, where the request's real Host header doesn't
+    # match what Burp expects.
+    mcp_extra_headers: dict[str, str] = Field(default_factory=dict)
 
 
 # ── Deduplicator ──────────────────────────────────────────────────────────────
