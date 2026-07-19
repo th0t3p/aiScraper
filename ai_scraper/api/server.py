@@ -15,12 +15,27 @@ from ai_scraper.service import AiScraperService, init_service, shutdown_service
 logger = logging.getLogger(__name__)
 
 
+def _configure_logging() -> None:
+    """Set up application-wide logging.
+
+    Called from both `__main__.py` and `run_server()` so every entrypoint
+    has consistent output.  Respects the `AI_SCRAPER__DEBUG` config flag:
+    DEBUG=true → DEBUG level, otherwise INFO.
+    """
+    level = logging.DEBUG if get_config().debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle for the FastAPI app."""
     # Startup
     logger.info("Starting AI Scraper service...")
-    await init_service()
+    service = await init_service()
+    await service.start()
     yield
     # Shutdown
     logger.info("Shutting down AI Scraper service...")
@@ -79,6 +94,7 @@ def run_server() -> None:
     """Entry point for `python -m ai_scraper.api.server`."""
     import uvicorn
 
+    _configure_logging()
     config = get_config()
     uvicorn.run(
         "ai_scraper.api.server:create_app",
