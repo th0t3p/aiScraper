@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 from ai_scraper.config import AppConfig, ApiConfig, set_config
-from ai_scraper.poller.models import RawBurpRecord, CursorMode, PollerState
+from ai_scraper.poller.models import RawBurpRecord, PollerState
 from ai_scraper.normalizer.models import TrafficRecord
 from burp_mcp_client import McpSseClient
 
@@ -30,24 +30,77 @@ def _pin_test_config():
     ))
 
 
+# ── Helpers to build raw HTTP text blobs ─────────────────────────────────────
+
+def _make_request(
+    method: str = "GET",
+    path: str = "/",
+    host: str = "api.example.com",
+    port: int | None = None,
+    headers: list[tuple[str, str]] | None = None,
+    body: str | None = None,
+) -> str:
+    """Build a raw HTTP request text blob."""
+    hdr_lines = [f"{method} {path} HTTP/1.1"]
+    host_hdr = host
+    if port and port not in (80, 443):
+        host_hdr = f"{host}:{port}"
+    hdr_lines.append(f"Host: {host_hdr}")
+    if headers:
+        for k, v in headers:
+            hdr_lines.append(f"{k}: {v}")
+    raw = "\r\n".join(hdr_lines)
+    if body:
+        raw += f"\r\n\r\n{body}"
+    else:
+        raw += "\r\n\r\n"
+    return raw
+
+
+def _make_response(
+    status_code: int = 200,
+    headers: list[tuple[str, str]] | None = None,
+    body: str | None = None,
+    date_str: str = "Mon, 21 Jul 2026 10:00:00 GMT",
+) -> str:
+    """Build a raw HTTP response text blob."""
+    status_text = {200: "OK", 201: "Created", 302: "Found", 404: "Not Found"}
+    hdr_lines = [f"HTTP/1.1 {status_code} {status_text.get(status_code, '')}"]
+    if date_str:
+        hdr_lines.append(f"Date: {date_str}")
+    if headers:
+        for k, v in headers:
+            hdr_lines.append(f"{k}: {v}")
+    raw = "\r\n".join(hdr_lines)
+    if body:
+        raw += f"\r\n\r\n{body}"
+    else:
+        raw += "\r\n\r\n"
+    return raw
+
+
 # ── Sample raw Burp records ──────────────────────────────────────────────────
 
 @pytest.fixture
 def sample_raw_record() -> RawBurpRecord:
     return RawBurpRecord(
-        id=1,
-        host="api.example.com",
-        port=443,
-        protocol="https",
-        method="GET",
-        path="/users/123/orders",
-        query="status=active&limit=10",
-        request_headers="Host: api.example.com\r\nAuthorization: Bearer eyJxxx\r\nContent-Type: application/json\r\n",
-        request_body=None,
-        response_status=200,
-        response_headers="Content-Type: application/json\r\nContent-Length: 42\r\n",
-        response_body='{"orders": [{"id": 1, "total": 99}]}',
-        timestamp="2026-07-18T10:00:00Z",
+        request=_make_request(
+            method="GET",
+            path="/users/123/orders?status=active&limit=10",
+            host="api.example.com",
+            headers=[
+                ("Authorization", "Bearer eyJxxx"),
+                ("Content-Type", "application/json"),
+            ],
+        ),
+        response=_make_response(
+            status_code=200,
+            headers=[
+                ("Content-Type", "application/json"),
+                ("Content-Length", "42"),
+            ],
+            body='{"orders": [{"id": 1, "total": 99}]}',
+        ),
     )
 
 
@@ -55,19 +108,17 @@ def sample_raw_record() -> RawBurpRecord:
 def sample_raw_records() -> list[RawBurpRecord]:
     return [
         RawBurpRecord(
-            id=i,
-            host="api.example.com",
-            port=443,
-            protocol="https",
-            method="GET",
-            path=f"/users/{i}/profile",
-            query="",
-            request_headers=f"Host: api.example.com\r\nCookie: session=abc{i}\r\n",
-            request_body=None,
-            response_status=200 if i % 2 == 0 else 404,
-            response_headers="Content-Type: application/json\r\n",
-            response_body='{"user": {"id": ' + str(i) + '}}',
-            timestamp=f"2026-07-18T10:00:{i:02d}Z",
+            request=_make_request(
+                method="GET",
+                path=f"/users/{i}/profile",
+                host="api.example.com",
+                headers=[("Cookie", f"session=abc{i}")],
+            ),
+            response=_make_response(
+                status_code=200 if i % 2 == 0 else 404,
+                headers=[("Content-Type", "application/json")],
+                body='{"user": {"id": ' + str(i) + '}}',
+            ),
         )
         for i in range(1, 11)
     ]
@@ -76,38 +127,41 @@ def sample_raw_records() -> list[RawBurpRecord]:
 @pytest.fixture
 def sample_raw_record_with_url_param() -> RawBurpRecord:
     return RawBurpRecord(
-        id=100,
-        host="webhook.example.com",
-        port=443,
-        protocol="https",
-        method="POST",
-        path="/api/callback",
-        query="url=https://evil.com&redirect=https://target.com",
-        request_headers="Host: webhook.example.com\r\nContent-Type: application/x-www-form-urlencoded\r\nCookie: sess=123\r\n",
-        request_body="webhook=https://attacker.net/hook",
-        response_status=302,
-        response_headers="Location: https://safe.com\r\n",
-        response_body="",
-        timestamp="2026-07-18T11:00:00Z",
+        request=_make_request(
+            method="POST",
+            path="/api/callback?url=https://evil.com&redirect=https://target.com",
+            host="webhook.example.com",
+            headers=[
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Cookie", "sess=123"),
+            ],
+            body="webhook=https://attacker.net/hook",
+        ),
+        response=_make_response(
+            status_code=302,
+            headers=[("Location", "https://safe.com")],
+        ),
     )
 
 
 @pytest.fixture
 def sample_raw_record_multipart() -> RawBurpRecord:
     return RawBurpRecord(
-        id=200,
-        host="upload.example.com",
-        port=443,
-        protocol="https",
-        method="POST",
-        path="/api/upload",
-        query="",
-        request_headers="Host: upload.example.com\r\nContent-Type: multipart/form-data; boundary=xxx\r\nAuthorization: Bearer token\r\n",
-        request_body="--xxx\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\n...\r\n--xxx--",
-        response_status=201,
-        response_headers="Content-Type: application/json\r\n",
-        response_body='{"ok": true}',
-        timestamp="2026-07-18T12:00:00Z",
+        request=_make_request(
+            method="POST",
+            path="/api/upload",
+            host="upload.example.com",
+            headers=[
+                ("Content-Type", "multipart/form-data; boundary=xxx"),
+                ("Authorization", "Bearer token"),
+            ],
+            body='--xxx\r\nContent-Disposition: form-data; name="file"\r\n\r\n...\r\n--xxx--',
+        ),
+        response=_make_response(
+            status_code=201,
+            headers=[("Content-Type", "application/json")],
+            body='{"ok": true}',
+        ),
     )
 
 
@@ -145,14 +199,12 @@ class FakeMcpClient:
 
     async def call_tool(self, tool_name: str, arguments: dict | None = None) -> list[dict]:
         self._call_log.append((tool_name, arguments or {}))
-        key = (tool_name, arguments.get("after_id") if arguments else None)
         if tool_name in self._responses:
             return self._responses[tool_name]
-        # Default: return empty list
         return []
 
     async def list_tools(self) -> list[dict]:
-        return [{"name": "getProxyHistory", "description": "Get proxy history"}]
+        return [{"name": "get_proxy_http_history", "description": "Get proxy history"}]
 
 
 @pytest.fixture
@@ -163,5 +215,5 @@ def fake_mcp_client() -> FakeMcpClient:
 @pytest.fixture
 def fake_mcp_client_with_data(sample_raw_record) -> FakeMcpClient:
     return FakeMcpClient(responses={
-        "getProxyHistory": [sample_raw_record.model_dump()],
+        "get_proxy_http_history": [sample_raw_record.model_dump()],
     })

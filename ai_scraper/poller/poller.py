@@ -1,4 +1,4 @@
-"""BurpPoller — incremental proxy history poller with cursor management."""
+"""BurpPoller — incremental proxy history poller with offset-based cursor."""
 
 from __future__ import annotations
 
@@ -7,19 +7,56 @@ import fnmatch
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, List, Optional
+from typing import Any, Awaitable, Callable, List, Optional
 
 from ai_scraper.config import PollerConfig, get_config
 from burp_mcp_client import McpSseClient
-from ai_scraper.poller.models import CursorMode, PollerState, RawBurpRecord
+from ai_scraper.poller.models import PollerState, RawBurpRecord
 
 logger = logging.getLogger(__name__)
 
 Callback = Callable[[list[RawBurpRecord]], Awaitable[None]]
 
+# Regex to extract the Host header value from raw HTTP request text.
+# Matches "Host: value" case-insensitively, anchored at line start.
+_HOST_RE = re.compile(r"^[Hh][Oo][Ss][Tt]:\s*(.+)$", re.MULTILINE)
+
+# Regex to extract the request line (method + path + query).
+_REQUEST_LINE_RE = re.compile(r"^(\S+)\s+(\S+)\s+HTTP/")
+
+
+def _extract_host_and_path(request_raw: str) -> tuple[str, str]:
+    """Return (host, path_with_query) from a raw HTTP request blob.
+
+    Returns (\"unknown\", \"/\") on any parse failure — callers must handle
+    these sentinel values gracefully.
+    """
+    # Request line: "METHOD /path?query HTTP/1.1"
+    line_end = request_raw.find("\r\n")
+    if line_end == -1:
+        line_end = request_raw.find("\n")
+    first_line = request_raw[:line_end] if line_end > 0 else request_raw[:200]
+
+    m = _REQUEST_LINE_RE.match(first_line)
+    path = m.group(2) if m else "/"
+
+    # Host header
+    m = _HOST_RE.search(request_raw)
+    host = m.group(1).strip() if m else "unknown"
+
+    return host, path
+
 
 class BurpPoller:
-    """Polls Burp MCP Server for proxy history using incremental cursor.
+    """Polls Burp MCP Server for proxy history using offset-based cursor.
+
+    The real Burp MCP get_proxy_http_history tool accepts:
+
+        { "count": int, "offset": int }
+
+    and returns a flat list of {request, response, notes} dicts.  We track
+    ``consumed_count`` as our cursor — the next poll requests
+    ``offset=consumed_count`` to get only new records.
 
     Usage::
 
@@ -37,9 +74,7 @@ class BurpPoller:
         mcp_client: McpSseClient | None = None,
     ):
         self._config = config or get_config().poller
-        self._state = PollerState(
-            mode=CursorMode(self._config.cursor_mode)
-        )
+        self._state = PollerState()
         self._mcp_client: Optional[McpSseClient] = mcp_client
         self._client: Optional[McpSseClient] = None
         self._discovered_tool: Optional[str] = None
@@ -68,10 +103,10 @@ class BurpPoller:
         await self._client.connect()
         await self._discover_proxy_tool()
         logger.info(
-            "Poller started (interval=%ds, cursor=%s, tool=%s)",
+            "Poller started (interval=%ds, tool=%s, consumed_count=%d)",
             self._config.poll_interval_seconds,
-            self._state.mode.value,
             self._tool_name,
+            self._state.consumed_count,
         )
         self._poll_task = asyncio.create_task(self._poll_loop())
 
@@ -112,15 +147,16 @@ class BurpPoller:
 
     def reset_cursor(self) -> None:
         """Reset the cursor so the next poll fetches everything from scratch."""
-        self._state.last_seen_id = None
-        self._state.last_seen_timestamp = None
+        self._state.consumed_count = 0
         self._state.total_polled = 0
         logger.info("Cursor reset")
 
     # ── MCP Tool Discovery ──────────────────────────────────────────────────
 
-    # Common proxy-history tool name patterns across Burp MCP versions
+    # Common proxy-history tool name patterns across Burp MCP versions.
+    # get_proxy_http_history is the official Burp MCP Server tool name.
     _PROXY_TOOL_CANDIDATES = [
+        "get_proxy_http_history", "getProxyHttpHistory",
         "getProxyHistory", "get_proxy_history", "proxyHistory",
         "listProxyHistory", "list_proxy_history", "getHistory",
         "proxy_history", "getProxyHist", "getAllProxyHistory",
@@ -197,8 +233,11 @@ class BurpPoller:
     async def _do_poll(self) -> list[RawBurpRecord]:
         assert self._client is not None
 
+        batch_size = self._config.batch_size
+        offset = self._state.consumed_count
+
         # 1. Fetch raw proxy history from Burp MCP
-        tool_args = self._build_tool_args()
+        tool_args: dict = {"count": batch_size, "offset": offset}
         logger.debug("Calling %s with args=%s", self._tool_name, tool_args)
         raw_data = await self._client.call_tool(
             self._tool_name, tool_args
@@ -206,37 +245,55 @@ class BurpPoller:
 
         # 2. Parse into RawBurpRecord list
         records = self._parse_records(raw_data)
-        if not records:
-            logger.debug("No new records in this poll cycle")
-            return []
+        returned_count = len(records)
 
-        # 3. Apply cursor filtering (safety net in case the tool doesn't support it)
-        records = self._apply_cursor_filter(records)
-        if not records:
-            logger.debug("No new records beyond cursor in this poll cycle")
-            return []
-
-        # 4. Advance cursors NOW — BEFORE url/scope filtering.
-        #    This prevents the poller from getting stuck when all new records
-        #    happen to be excluded by url/scope filters.
-        cursor_advanced = len(records)
-        self._update_cursor(records)
-        self._state.total_polled += cursor_advanced
+        # 3. Mark the cycle as successful — even if zero records returned.
+        #    An empty batch at a valid offset just means we're caught up.
         self._state.last_poll_at = datetime.now(timezone.utc)
 
-        # 5. Apply regex filters (post-cursor — safe to drop here)
-        records = self._apply_url_filters(records)
+        # 4. Handle "caught up" / "history possibly cleared" cases
+        if returned_count == 0 and offset > 0:
+            # Could be caught up, or Burp history was cleared entirely
+            # while we still hold a high offset.  Reset as a recovery.
+            logger.warning(
+                "Offset %d returned 0 records — history may have been cleared. "
+                "Resetting consumed_count to 0.",
+                offset,
+            )
+            self._state.consumed_count = 0
+            self._state.total_polled = 0
+        elif returned_count == 0:
+            logger.debug("No records at offset 0 — Burp history is empty")
+            return []
+        elif returned_count < batch_size:
+            # Fewer than requested = we've reached the current end of history
+            logger.debug(
+                "Caught up: offset=%d returned %d/%d records",
+                offset, returned_count, batch_size,
+            )
 
-        # 6. Validate authorized scope (post-cursor — safe to drop here)
+        if returned_count == 0:
+            return []
+
+        # 5. Advance cursor by actual returned count (BEFORE filtering —
+        #    see next step for rationale).
+        self._state.consumed_count += returned_count
+        self._state.total_polled += returned_count
+
+        # 6. Apply URL regex and authorized-scope filters.
+        #    Filters run POST-cursor-advance to prevent the poller from
+        #    getting stuck when all new records are out of scope.
+        records = self._apply_url_filters(records)
         records = self._validate_authorized_scope(records)
 
         passed_through = len(records)
         logger.info(
-            "Polled %d new records (cursor advanced); %d passed filters (total cursor=%d)",
-            cursor_advanced, passed_through, self._state.total_polled,
+            "Polled %d records (offset=%d→%d); %d passed filters (total consumed=%d)",
+            returned_count, offset, self._state.consumed_count,
+            passed_through, self._state.total_polled,
         )
 
-        # 7. Notify callbacks
+        # 7. Notify callbacks (only with records that passed filters)
         for cb in self._callbacks:
             try:
                 await cb(records)
@@ -244,18 +301,6 @@ class BurpPoller:
                 logger.exception("Callback %s raised an error", cb.__name__)
 
         return records
-
-    def _build_tool_args(self) -> dict:
-        """Build the arguments dict for the proxy history MCP tool."""
-        args: dict = {"limit": self._config.batch_size}
-
-        if self._state.mode == CursorMode.BY_ID and self._state.last_seen_id is not None:
-            # Request records with id > last_seen_id
-            args["after_id"] = self._state.last_seen_id
-        elif self._state.mode == CursorMode.BY_TIME and self._state.last_seen_timestamp is not None:
-            args["since"] = self._state.last_seen_timestamp.isoformat()
-
-        return args
 
     # ── Parsing ──────────────────────────────────────────────────────────────
 
@@ -273,9 +318,8 @@ class BurpPoller:
             # Sometimes the response is {"items": [...], "total": N} etc.
             items = raw_data.get("items") or raw_data.get("entries") or raw_data.get("history") or []
             if not items and all(isinstance(v, dict) for v in raw_data.values()):
-                # Maybe it's a dict of id→record
                 items = list(raw_data.values())
-            if not items and "id" in raw_data:
+            if not items and "request" in raw_data:
                 # Single record
                 items = [raw_data]
         else:
@@ -289,66 +333,21 @@ class BurpPoller:
                 logger.debug("Failed to parse raw record: %s", str(item)[:200])
         return records
 
-    # ── Cursor filtering ─────────────────────────────────────────────────────
-
-    def _apply_cursor_filter(self, records: list[RawBurpRecord]) -> list[RawBurpRecord]:
-        """Client-side cursor filter as a safety net.
-
-        Even if we pass cursor args to the MCP tool, some implementations
-        may ignore them — this filter guarantees incrementality.
-        """
-        if self._state.mode == CursorMode.BY_ID and self._state.last_seen_id is not None:
-            threshold = self._state.last_seen_id
-            records = [r for r in records if r.id > threshold]
-        elif self._state.mode == CursorMode.BY_TIME and self._state.last_seen_timestamp is not None:
-            threshold = self._state.last_seen_timestamp
-            filtered: list[RawBurpRecord] = []
-            for r in records:
-                if r.timestamp:
-                    try:
-                        ts = datetime.fromisoformat(r.timestamp.replace("Z", "+00:00"))
-                        if ts > threshold:
-                            filtered.append(r)
-                    except ValueError:
-                        # Unparseable timestamp — include it to be safe
-                        filtered.append(r)
-                else:
-                    # No timestamp — include it
-                    filtered.append(r)
-            records = filtered
-        return records
-
-    def _update_cursor(self, records: list[RawBurpRecord]) -> None:
-        if not records:
-            return
-        if self._state.mode == CursorMode.BY_ID:
-            max_id = max(r.id for r in records)
-            self._state.last_seen_id = max_id
-        else:
-            latest: Optional[datetime] = None
-            for r in records:
-                if r.timestamp:
-                    try:
-                        ts = datetime.fromisoformat(r.timestamp.replace("Z", "+00:00"))
-                        if latest is None or ts > latest:
-                            latest = ts
-                    except ValueError:
-                        pass
-            if latest:
-                self._state.last_seen_timestamp = latest
-
     # ── URL filtering ────────────────────────────────────────────────────────
 
     def _apply_url_filters(self, records: list[RawBurpRecord]) -> list[RawBurpRecord]:
-        """Apply include/exclude URL regex filters."""
+        """Apply include/exclude URL regex filters.
+
+        Filters now parse the target URL from the raw request text blob
+        since RawBurpRecord no longer has separate host/path fields.
+        """
         if not self._include_res and not self._exclude_res:
             return records
 
         result: list[RawBurpRecord] = []
         for r in records:
-            url = f"{r.protocol}://{r.host}{r.path}"
-            if r.query:
-                url += f"?{r.query}"
+            host, path = _extract_host_and_path(r.request)
+            url = f"https://{host}{path}"  # protocol is unknown, assume https
 
             if self._include_res and not any(p.search(url) for p in self._include_res):
                 continue
@@ -382,14 +381,14 @@ class BurpPoller:
 
         result: list[RawBurpRecord] = []
         for r in records:
+            host, _ = _extract_host_and_path(r.request)
             for scope in scopes:
-                if fnmatch.fnmatch(r.host, scope):
+                if fnmatch.fnmatch(host, scope):
                     result.append(r)
                     break
             else:
                 logger.debug(
-                    "Dropped record id=%d host=%s (not in authorized_scope)",
-                    r.id, r.host,
+                    "Dropped record host=%s (not in authorized_scope)", host,
                 )
         return result
 

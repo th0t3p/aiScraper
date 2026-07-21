@@ -31,7 +31,6 @@ class PostgresConfig(BaseModel):
 class PollerConfig(BaseModel):
     mcp_sse_url: str = "http://127.0.0.1:9876"
     poll_interval_seconds: int = 30
-    cursor_mode: str = "by_id"  # "by_id" | "by_time"
     # 拉取时的正则过滤（URL 匹配任一 pattern 才保留）
     include_url_patterns: list[str] = Field(default_factory=list)
     exclude_url_patterns: list[str] = Field(default_factory=list)

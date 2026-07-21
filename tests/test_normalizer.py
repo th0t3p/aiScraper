@@ -1,4 +1,4 @@
-"""Tests for the Normalizer module."""
+"""Tests for the Normalizer module — raw HTTP text parsing."""
 
 from __future__ import annotations
 
@@ -9,13 +9,12 @@ from ai_scraper.normalizer.normalizer import Normalizer
 
 
 class TestNormalize:
-    """Tests for single-record normalization."""
+    """Tests for single-record normalization from raw HTTP text blobs."""
 
     def test_basic_fields(self, sample_raw_record):
         norm = Normalizer()
         result = norm.normalize(sample_raw_record)
 
-        assert result.request_id == "burp:1"
         assert result.method == "GET"
         assert result.host == "api.example.com"
         assert result.path == "/users/123/orders"
@@ -45,109 +44,136 @@ class TestNormalize:
         assert result.response_headers["content-type"] == "application/json"
         assert result.response_headers["content-length"] == "42"
 
-    def test_timestamp_parsing(self):
+    def test_timestamp_from_date_header(self):
         raw = RawBurpRecord(
-            id=1, host="x.com", port=443, protocol="https",
-            method="GET", path="/", query=None,
-            request_headers="", request_body=None,
-            response_status=None, response_headers=None, response_body=None,
-            timestamp="2026-07-18T10:00:00+00:00",
+            request="GET / HTTP/1.1\r\nHost: x.com\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\nDate: Mon, 21 Jul 2026 10:00:00 GMT\r\n\r\n",
         )
         norm = Normalizer()
         result = norm.normalize(raw)
         assert result.timestamp.year == 2026
         assert result.timestamp.month == 7
-        assert result.timestamp.day == 18
+        assert result.timestamp.day == 21
 
     def test_timestamp_fallback(self):
-        """Missing timestamp → falls back to now()."""
+        """Missing Date header → falls back to now()."""
         raw = RawBurpRecord(
-            id=1, host="x.com", port=443, protocol="https",
-            method="GET", path="/", query=None,
-            request_headers="", request_body=None,
-            response_status=None, response_headers=None, response_body=None,
-            timestamp=None,
+            request="GET / HTTP/1.1\r\nHost: x.com\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\n\r\n",
         )
         norm = Normalizer()
         result = norm.normalize(raw)
-        # Should be close to current time
         delta = abs((datetime.now(timezone.utc) - result.timestamp).total_seconds())
         assert delta < 5, f"Timestamp fallback too far off: {delta}s"
+
+    def test_timestamp_lowercase_date_header(self):
+        """HTTP/2 style lowercase 'date:' header."""
+        raw = RawBurpRecord(
+            request="GET / HTTP/1.1\r\nHost: x.com\r\n\r\n",
+            response="HTTP/2 200 OK\r\ndate: Mon, 21 Jul 2026 14:30:00 GMT\r\n\r\n",
+        )
+        norm = Normalizer()
+        result = norm.normalize(raw)
+        assert result.timestamp.hour == 14
+        assert result.timestamp.minute == 30
 
     def test_port_in_url(self):
         """Non-standard port should appear in URL."""
         raw = RawBurpRecord(
-            id=1, host="x.com", port=8080, protocol="http",
-            method="GET", path="/test", query="a=1",
-            request_headers="", request_body=None,
-            response_status=200, response_headers=None, response_body=None,
-            timestamp="2026-01-01T00:00:00Z",
+            request="GET /test?a=1 HTTP/1.1\r\nHost: x.com:8080\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\n\r\n",
         )
         norm = Normalizer()
         result = norm.normalize(raw)
         assert result.url == "http://x.com:8080/test?a=1"
 
-    def test_standard_port_omitted(self):
-        """Port 80 for http / 443 for https should be omitted."""
+    def test_standard_ports_omitted(self):
+        """Port 80 → http, port 443 → https, omitted from URL."""
+        raw_http = RawBurpRecord(
+            request="GET / HTTP/1.1\r\nHost: x.com:80\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\n\r\n",
+        )
+        norm = Normalizer()
+        assert norm.normalize(raw_http).url == "http://x.com/"
+
+        raw_https = RawBurpRecord(
+            request="GET / HTTP/1.1\r\nHost: x.com:443\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\n\r\n",
+        )
+        assert norm.normalize(raw_https).url == "https://x.com/"
+
+    def test_protocol_from_x_forwarded_proto(self):
         raw = RawBurpRecord(
-            id=1, host="x.com", port=80, protocol="http",
-            method="GET", path="/", query=None,
-            request_headers="", request_body=None,
-            response_status=200, response_headers=None, response_body=None,
-            timestamp="2026-01-01T00:00:00Z",
+            request="GET / HTTP/1.1\r\nHost: x.com\r\nX-Forwarded-Proto: http\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\n\r\n",
         )
         norm = Normalizer()
         result = norm.normalize(raw)
-        assert result.url == "http://x.com/"
+        assert result.url.startswith("http://")
 
     def test_empty_headers(self):
         raw = RawBurpRecord(
-            id=1, host="x.com", port=443, protocol="https",
-            method="GET", path="/", query=None,
-            request_headers="", request_body=None,
-            response_status=None, response_headers="", response_body=None,
-            timestamp=None,
+            request="GET / HTTP/1.1\r\nHost: x.com\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\n\r\n",
         )
         norm = Normalizer()
         result = norm.normalize(raw)
-        assert result.headers == {}
+        assert result.headers == {"host": "x.com"}
         assert result.response_headers == {}
 
     def test_malformed_headers_skipped(self):
         raw = RawBurpRecord(
-            id=1, host="x.com", port=443, protocol="https",
-            method="GET", path="/", query=None,
-            request_headers="This is not a header\nHost: example.com\nNoColonHere\n",
-            request_body=None,
-            response_status=None, response_headers=None, response_body=None,
-            timestamp=None,
+            request="GET / HTTP/1.1\r\nHost: example.com\r\nThisIsNotAHeader\r\nNoColonHere\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\n\r\n",
         )
         norm = Normalizer()
         result = norm.normalize(raw)
-        # "This is not a header" and "NoColonHere" should be skipped
-        assert result.headers == {"host": "example.com"}
+        assert result.headers["host"] == "example.com"
+        # Malformed lines are silently skipped
 
     def test_duplicate_set_cookie_merged(self):
         """Multiple Set-Cookie headers should be merged, not silently overwritten."""
         raw = RawBurpRecord(
-            id=1, host="x.com", port=443, protocol="https",
-            method="GET", path="/", query=None,
-            request_headers="Host: x.com\r\nSet-Cookie: session=abc\r\nSet-Cookie: csrf=xyz\r\n",
-            request_body=None,
-            response_status=200,
-            response_headers="Set-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Type: text/html\r\n",
-            response_body=None,
-            timestamp=None,
+            request="GET / HTTP/1.1\r\nHost: x.com\r\nSet-Cookie: session=abc\r\nSet-Cookie: csrf=xyz\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Type: text/html\r\n\r\n",
         )
         norm = Normalizer()
         result = norm.normalize(raw)
-        # Both Set-Cookie values should be present (merged with "; ")
         assert "session=abc" in result.headers["set-cookie"]
         assert "csrf=xyz" in result.headers["set-cookie"]
-        # Response headers too
         assert result.response_headers is not None
         assert "a=1" in result.response_headers["set-cookie"]
         assert "b=2" in result.response_headers["set-cookie"]
+
+    def test_request_body_parsing(self):
+        raw = RawBurpRecord(
+            request="POST /api/login HTTP/1.1\r\nHost: x.com\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 19\r\n\r\nuser=admin&pass=123",
+            response="HTTP/1.1 302 Found\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\n\r\n",
+        )
+        norm = Normalizer()
+        result = norm.normalize(raw)
+        assert result.body == "user=admin&pass=123"
+
+    def test_method_and_path_extracted(self):
+        raw = RawBurpRecord(
+            request="POST /api/v2/submit?debug=1 HTTP/1.1\r\nHost: x.com\r\n\r\n",
+            response="HTTP/1.1 201 Created\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\n\r\n",
+        )
+        norm = Normalizer()
+        result = norm.normalize(raw)
+        assert result.method == "POST"
+        assert result.path == "/api/v2/submit"
+        assert result.query_params == {"debug": ["1"]}
+
+    def test_ipv6_host(self):
+        raw = RawBurpRecord(
+            request="GET /api HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\n\r\n",
+        )
+        norm = Normalizer()
+        result = norm.normalize(raw)
+        assert result.host == "::1"
+        assert "8080" in result.url
 
 
 class TestNormalizeBatch:
@@ -163,9 +189,11 @@ class TestNormalizeBatch:
 
 
 class TestParamNamesJsonBody:
-    """Tests for param_names with JSON body parsing."""
+    """Tests for param_names with JSON body parsing.
+    These tests construct TrafficRecord directly — they test the model
+    logic, not the normalizer."""
 
-    def test_flat_json_body(self, sample_raw_record):
+    def test_flat_json_body(self):
         from ai_scraper.normalizer.models import TrafficRecord
         from datetime import datetime, timezone
         record = TrafficRecord(

@@ -23,7 +23,7 @@ def mock_service():
     svc.poller = MagicMock()
     svc.poller.get_state.return_value = MagicMock()
     svc.poller.get_state.return_value.model_dump.return_value = {
-        "mode": "by_id", "last_seen_id": 0, "total_polled": 0, "last_poll_at": None,
+        "consumed_count": 0, "total_polled": 0, "last_poll_at": None,
     }
     svc.storage = MagicMock()
     svc.storage.query = AsyncMock()
@@ -75,7 +75,7 @@ class TestStateEndpoint:
         response = client.get("/api/v1/state")
         assert response.status_code == 200
         data = response.json()
-        assert "mode" in data
+        assert "consumed_count" in data
         assert "total_polled" in data
 
 
