@@ -1,0 +1,29 @@
+# ── aiScraper systemd user service ─────────────────────────────────────────
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/ai-scraper.service ~/.config/systemd/user/
+#   # Edit ~/.config/systemd/user/ai-scraper.service and fill in the
+#   # placeholder paths below before enabling.
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ai-scraper.service
+#
+# View logs:
+#   journalctl --user -u ai-scraper.service -f
+#
+# Stop:
+#   systemctl --user stop ai-scraper.service
+
+[Unit]
+Description=AI Scraper — Burp traffic ingestion & normalization
+After=network.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/aiScraper
+ExecStart=/path/to/aiScraper/.venv/bin/python -m ai_scraper
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

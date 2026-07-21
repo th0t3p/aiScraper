@@ -1,16 +1,12 @@
 # ── AI Scraper docker-compose ────────────────────────────────────────────────
-# Start:   docker-compose --env-file .env up -d
-# Stop:    docker-compose down
-# Logs:    docker-compose logs -f ai-scraper
+# Start:   docker compose up -d
+# Stop:    docker compose down
 #
 # Notes:
-#   - PostgreSQL runs as a sibling service
-#   - Burp MCP Server must be running on the host at http://127.0.0.1:9876
-#   - The container accesses it via host.docker.internal
-#   - Ports are commented out by default (internal docker network only)
-#     Uncomment to expose to the host or external network
-
-version: "3.9"
+#   - Only PostgreSQL runs in Docker — the ai-scraper app itself runs
+#     natively (python -m ai_scraper) because Burp's MCP Server rejects
+#     Docker-originated connections via its anti-DNS-rebinding protection.
+#   - Postgres is exposed on port 5432 so the native app can connect.
 
 services:
   postgres:
@@ -21,9 +17,8 @@ services:
       POSTGRES_USER: ${AI_SCRAPER__POSTGRES__USER:-postgres}
       POSTGRES_PASSWORD: ${AI_SCRAPER__POSTGRES__PASSWORD}
       POSTGRES_DB: ${AI_SCRAPER__POSTGRES__DATABASE:-bugbounty}
-    # Uncomment to expose PostgreSQL to the host (security risk — prefer docker network):
-    # ports:
-    #   - "5432:5432"
+    ports:
+      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -31,40 +26,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-
-  ai-scraper:
-    build: .
-    container_name: ai-scraper-app
-    restart: unless-stopped
-    # Uncomment to expose the API to the host (security risk — prefer docker network):
-    ports:
-      - "8700:8700"
-    environment:
-      # PostgreSQL — connect to the sibling service
-      AI_SCRAPER__POSTGRES__HOST: postgres
-      AI_SCRAPER__POSTGRES__PORT: "5432"
-      AI_SCRAPER__POSTGRES__DATABASE: ${AI_SCRAPER__POSTGRES__DATABASE:-bugbounty}
-      AI_SCRAPER__POSTGRES__USER: ${AI_SCRAPER__POSTGRES__USER:-postgres}
-      AI_SCRAPER__POSTGRES__PASSWORD: ${AI_SCRAPER__POSTGRES__PASSWORD}
-
-      # Burp MCP Server — running on the host machine
-      AI_SCRAPER__POLLER__MCP_SSE_URL: http://host.docker.internal:9876
-      AI_SCRAPER__POLLER__POLL_INTERVAL_SECONDS: "30"
-
-      # API — binds to 127.0.0.1 by default (no external access)
-      # Change to 0.0.0.0 ONLY if you need external access and understand the risk
-      AI_SCRAPER__API__HOST: "0.0.0.0"
-      AI_SCRAPER__API__PORT: "8700"
-      AI_SCRAPER__API__API_KEY: ${AI_SCRAPER__API__API_KEY:-}
-
-      # Debug
-      AI_SCRAPER__DEBUG: "false"
-
-    depends_on:
-      postgres:
-        condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
 volumes:
   pgdata:

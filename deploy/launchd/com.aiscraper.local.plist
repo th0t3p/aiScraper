@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  aiScraper launchd user agent (macOS)
+
+  Install:
+    cp deploy/launchd/com.aiscraper.local.plist ~/Library/LaunchAgents/
+    # Edit ~/Library/LaunchAgents/com.aiscraper.local.plist and fill in
+    # the placeholder paths /path/to/aiScraper below.
+    launchctl load ~/Library/LaunchAgents/com.aiscraper.local.plist
+
+  View logs:
+    tail -f ~/Library/Logs/ai-scraper.log
+    tail -f ~/Library/Logs/ai-scraper-error.log
+
+  Stop / unload:
+    launchctl unload ~/Library/LaunchAgents/com.aiscraper.local.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiscraper.local</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/aiScraper/.venv/bin/python</string>
+        <string>-m</string>
+        <string>ai_scraper</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/path/to/aiScraper</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/REPLACE_WITH_YOUR_USERNAME/Library/Logs/ai-scraper.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/REPLACE_WITH_YOUR_USERNAME/Library/Logs/ai-scraper-error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

@@ -152,28 +152,33 @@ reachable by anything other than you.
 
 ## Running
 
-### Locally
-
 ```bash
+# One-shot setup (creates .venv, installs deps, copies .env.example → .env)
+bash scripts/setup_local.sh
+
+# Start Postgres (Docker — the app itself runs natively)
+docker compose up -d
+
+# Start aiScraper
+source .venv/bin/activate
 python -m ai_scraper
 ```
+
+The poller connects directly to Burp's MCP Server at `127.0.0.1:9876`.
+Burp's built-in anti-DNS-rebinding protection requires genuine localhost
+connections — it rejects requests whose `Host` header or connection origin
+isn't loopback, which is fundamentally incompatible with Docker networking
+(`host.docker.internal` is not `127.0.0.1` from Burp's perspective).  For
+this reason, only Postgres stays containerized; the ai-scraper app itself
+runs natively as a normal local process.
 
 This starts the FastAPI server **and** the poller loop in the same
 process — the poller runs as a background task attached to the API
 server's lifespan, so there's nothing separate to start.
 
-### Docker
-
-```bash
-docker-compose --env-file .env up -d
-```
-
-Ports are intentionally commented out in `docker-compose.yml` by
-default — the API and Postgres are only reachable from within the
-docker network unless you explicitly uncomment the `ports:` sections
-(each has a comment explaining the tradeoff). Burp is assumed to be
-running on the **host** machine; the container reaches it via
-`host.docker.internal`, already wired into the compose file.
+For persistence (keep it running after logout / across reboots), see
+[deploy/README.md](deploy/README.md) — systemd user service on Linux,
+launchd user agent on macOS.
 
 ---
 
