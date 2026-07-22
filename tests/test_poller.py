@@ -93,7 +93,7 @@ class TestPollerCursor:
         # First call should use offset=0
         assert len(fake.calls) == 1
         assert fake.calls[0][0] == "get_proxy_http_history"
-        assert fake.calls[0][1] == {"count": 200, "offset": 0}
+        assert fake.calls[0][1] == {"count": 50, "offset": 0}
 
     @pytest.mark.asyncio
     async def test_cursor_offset_incremental(self):
@@ -379,6 +379,37 @@ class TestPollerParseRecords:
         poller = BurpPoller(config=config)
         records = poller._parse_records([])
         assert records == []
+
+    def test_parse_blank_line_separated_json_string(self):
+        """Real Burp MCP tool returns a string of JSON objects separated
+        by blank lines (\\n\\n).  _parse_records must handle this."""
+        import json as _json
+
+        config = PollerConfig()
+        poller = BurpPoller(config=config)
+
+        rec1 = _make_raw(_request="GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n")
+        rec2 = _make_raw(_request="GET /b HTTP/1.1\r\nHost: b.com\r\n\r\n")
+        raw_str = (
+            _json.dumps(rec1.model_dump()) + "\n\n"
+            + _json.dumps(rec2.model_dump()) + "\n\n"
+        )
+
+        records = poller._parse_records(raw_str)
+        assert len(records) == 2
+
+    def test_parse_blank_line_separated_json_with_crlf(self):
+        """The blank-line separator should also tolerate \\r\\n\\r\\n."""
+        import json as _json
+
+        config = PollerConfig()
+        poller = BurpPoller(config=config)
+
+        rec = _make_raw(_request="GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n")
+        raw_str = _json.dumps(rec.model_dump()) + "\r\n\r\n"
+
+        records = poller._parse_records(raw_str)
+        assert len(records) == 1
 
 
 class TestCursorAdvancementWithFilters:

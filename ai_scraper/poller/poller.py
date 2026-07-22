@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json as _json
 import logging
 import re
 from datetime import datetime, timezone
@@ -230,18 +231,45 @@ class BurpPoller:
                 logger.exception("Poll cycle failed, will retry")
             await asyncio.sleep(self._config.poll_interval_seconds)
 
+    _COUNT_FLOOR = 10
+
     async def _do_poll(self) -> list[RawBurpRecord]:
         assert self._client is not None
 
-        batch_size = self._config.batch_size
+        count = self._config.batch_size
         offset = self._state.consumed_count
 
-        # 1. Fetch raw proxy history from Burp MCP
-        tool_args: dict = {"count": batch_size, "offset": offset}
-        logger.debug("Calling %s with args=%s", self._tool_name, tool_args)
-        raw_data = await self._client.call_tool(
-            self._tool_name, tool_args
-        )
+        # 1. Fetch raw proxy history from Burp MCP — with timeout retry.
+        #    If count exceeds Burp's practical limit, the call hangs
+        #    indefinitely rather than returning available data.  On timeout
+        #    we halve count and retry immediately, down to a floor.
+        raw_data = None
+        error = None
+
+        for attempt in range(3):
+            tool_args = {"count": count, "offset": offset}
+            logger.debug("Calling %s with args=%s (attempt %d)", self._tool_name, tool_args, attempt + 1)
+            try:
+                raw_data = await self._client.call_tool(
+                    self._tool_name, tool_args
+                )
+                break  # success
+            except TimeoutError as exc:
+                error = exc
+                count = max(count // 2, self._COUNT_FLOOR)
+                logger.warning(
+                    "get_proxy_http_history timed out with count=%d — "
+                    "retrying with count=%d in this cycle",
+                    tool_args["count"], count,
+                )
+            except Exception:
+                # Non-timeout errors (connection, etc.) — re-raise immediately
+                raise
+
+        if raw_data is None:
+            if error:
+                raise error
+            return []
 
         # 2. Parse into RawBurpRecord list
         records = self._parse_records(raw_data)
@@ -265,11 +293,11 @@ class BurpPoller:
         elif returned_count == 0:
             logger.debug("No records at offset 0 — Burp history is empty")
             return []
-        elif returned_count < batch_size:
+        elif returned_count < count:
             # Fewer than requested = we've reached the current end of history
             logger.debug(
                 "Caught up: offset=%d returned %d/%d records",
-                offset, returned_count, batch_size,
+                offset, returned_count, count,
             )
 
         if returned_count == 0:
@@ -305,26 +333,69 @@ class BurpPoller:
     # ── Parsing ──────────────────────────────────────────────────────────────
 
     def _parse_records(self, raw_data: object) -> list[RawBurpRecord]:
-        """Convert the MCP tool response into a list of RawBurpRecord."""
+        """Convert the MCP tool response into a list of RawBurpRecord.
+
+        The real Burp MCP get_proxy_http_history tool returns its result as
+        a string of JSON objects concatenated with blank-line separators
+        (\\n\\n).  ``burp_mcp_client.call_tool()``'s json.loads() fails on
+        this multi-document string and falls back to returning it as-is,
+        so we see a plain ``str`` here.
+        """
         if raw_data is None:
             return []
 
-        # The tool may return different shapes — handle common ones.
+        if isinstance(raw_data, str):
+            return self._parse_records_from_string(raw_data)
+
+        # Legacy shapes — kept as fallback in case the server-side format
+        # changes to return proper JSON arrays/dicts in a future version.
         items: list[dict] = []
 
         if isinstance(raw_data, list):
             items = raw_data
         elif isinstance(raw_data, dict):
-            # Sometimes the response is {"items": [...], "total": N} etc.
             items = raw_data.get("items") or raw_data.get("entries") or raw_data.get("history") or []
             if not items and all(isinstance(v, dict) for v in raw_data.values()):
                 items = list(raw_data.values())
             if not items and "request" in raw_data:
-                # Single record
                 items = [raw_data]
         else:
             return []
 
+        return self._build_records(items)
+
+    def _parse_records_from_string(self, raw: str) -> list[RawBurpRecord]:
+        """Parse a string of blank-line-separated JSON objects.
+
+        e.g.:
+
+            {\"request\": \"...\", \"response\": \"...\", \"notes\": \"\"}
+
+            {\"request\": \"...\", \"response\": \"...\", \"notes\": \"\"}
+        """
+        # Normalize line endings: \\r\\n → \\n, then split on blank lines
+        raw = raw.replace("\r\n", "\n")
+        chunks = raw.split("\n\n")
+        items: list[dict] = []
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                obj = _json.loads(chunk)
+                if isinstance(obj, dict):
+                    items.append(obj)
+                elif isinstance(obj, list):
+                    items.extend(obj)
+            except _json.JSONDecodeError:
+                logger.debug(
+                    "Failed to JSON-decode chunk in tool response: %s",
+                    chunk[:200],
+                )
+        return self._build_records(items)
+
+    @staticmethod
+    def _build_records(items: list[dict]) -> list[RawBurpRecord]:
         records: list[RawBurpRecord] = []
         for item in items:
             try:

@@ -43,7 +43,7 @@ class PollerConfig(BaseModel):
     request_content_tool: str = "getRequest"
     response_content_tool: str = "getResponse"
     # 每次拉取的最大记录数
-    batch_size: int = 200
+    batch_size: int = 50
     # MCP 请求超时（秒）
     request_timeout: float = 30.0
     # ── McpSseClient constructor extras ─────────────────────────────────────
