@@ -100,7 +100,7 @@ def run_server() -> None:
         "ai_scraper.api.server:create_app",
         host=config.api.host,
         port=config.api.port,
-        reload=config.debug,
+        reload=config.reload,
         factory=True,
     )
 

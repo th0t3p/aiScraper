@@ -127,6 +127,7 @@ class AppConfig(BaseSettings):
     enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     debug: bool = False
+    reload: bool = False
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
