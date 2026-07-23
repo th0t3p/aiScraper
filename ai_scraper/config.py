@@ -47,6 +47,9 @@ class PollerConfig(BaseModel):
     # MCP 请求超时（秒）
     request_timeout: float = 30.0
     # ── McpSseClient constructor extras ─────────────────────────────────────
+    # Which MCP server implementation to connect to: "portswigger" (official
+    # PortSwigger extension) or "burpmcp_ultra".
+    mcp_backend: str = "portswigger"
     # SSE endpoint path on the MCP server (official PortSwigger: "/sse",
     # BurpMCP-Ultra: "/")
     mcp_sse_path: str = "/sse"
@@ -145,3 +148,23 @@ def get_config() -> AppConfig:
 def set_config(config: AppConfig) -> None:
     global _config
     _config = config
+
+
+def apply_cli_overrides(config: AppConfig, args) -> AppConfig:
+    """Apply CLI argument overrides on top of the .env-derived config.
+
+    Only fields where the CLI argument was explicitly passed (i.e. is not
+    ``None``) are overridden — everything else keeps its existing value.
+    """
+    if args.mcp_backend is not None:
+        config.poller.mcp_backend = args.mcp_backend
+        # Sensible sse_path default per backend, but only if the user
+        # hasn't already customized it (either in .env or later via a
+        # future --mcp-sse-path flag).
+        if args.mcp_backend == "burpmcp_ultra" and config.poller.mcp_sse_path == "/sse":
+            config.poller.mcp_sse_path = "/"
+    if args.mcp_sse_url is not None:
+        config.poller.mcp_sse_url = args.mcp_sse_url
+    if args.mcp_auth_token is not None:
+        config.poller.mcp_auth_token = args.mcp_auth_token
+    return config

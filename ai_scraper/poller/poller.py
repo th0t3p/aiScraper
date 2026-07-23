@@ -272,7 +272,7 @@ class BurpPoller:
             return []
 
         # 2. Parse into RawBurpRecord list
-        records = self._parse_records(raw_data)
+        records, failed_chunks = self._parse_records(raw_data)
         returned_count = len(records)
 
         # 3. Mark the cycle as successful — even if zero records returned.
@@ -316,9 +316,10 @@ class BurpPoller:
 
         passed_through = len(records)
         logger.info(
-            "Polled %d records (offset=%d→%d); %d passed filters (total consumed=%d)",
+            "Polled %d records (offset=%d→%d); %d passed filters; "
+            "%d objects failed to parse (total consumed=%d)",
             returned_count, offset, self._state.consumed_count,
-            passed_through, self._state.total_polled,
+            passed_through, failed_chunks, self._state.total_polled,
         )
 
         # 7. Notify callbacks (only with records that passed filters)
@@ -332,17 +333,19 @@ class BurpPoller:
 
     # ── Parsing ──────────────────────────────────────────────────────────────
 
-    def _parse_records(self, raw_data: object) -> list[RawBurpRecord]:
+    def _parse_records(self, raw_data: object) -> tuple[list[RawBurpRecord], int]:
         """Convert the MCP tool response into a list of RawBurpRecord.
 
         The real Burp MCP get_proxy_http_history tool returns its result as
-        a string of JSON objects concatenated with blank-line separators
-        (\\n\\n).  ``burp_mcp_client.call_tool()``'s json.loads() fails on
-        this multi-document string and falls back to returning it as-is,
-        so we see a plain ``str`` here.
+        a string of whitespace-separated JSON objects.  Parsing uses
+        json.JSONDecoder().raw_decode() to determine each object's real
+        boundaries from JSON syntax, not a fragile blank-line heuristic
+        (see `_parse_records_from_string`).
+
+        Returns (records, parse_failure_count).
         """
         if raw_data is None:
-            return []
+            return [], 0
 
         if isinstance(raw_data, str):
             return self._parse_records_from_string(raw_data)
@@ -360,39 +363,69 @@ class BurpPoller:
             if not items and "request" in raw_data:
                 items = [raw_data]
         else:
-            return []
+            return [], 0
 
-        return self._build_records(items)
+        return self._build_records(items), 0
 
-    def _parse_records_from_string(self, raw: str) -> list[RawBurpRecord]:
-        """Parse a string of blank-line-separated JSON objects.
+    def _parse_records_from_string(self, raw: str) -> tuple[list[RawBurpRecord], int]:
+        """Parse a string of whitespace-separated JSON objects.
 
-        e.g.:
+        Uses json.JSONDecoder().raw_decode() to determine each object's real
+        end from JSON syntax rather than a blank-line heuristic.  This
+        handles objects whose string values contain unescaped newline
+        characters (a known serialization bug in Burp MCP).
 
-            {\"request\": \"...\", \"response\": \"...\", \"notes\": \"\"}
-
-            {\"request\": \"...\", \"response\": \"...\", \"notes\": \"\"}
+        Returns (records, parse_failure_count).
         """
-        # Normalize line endings: \\r\\n → \\n, then split on blank lines
-        raw = raw.replace("\r\n", "\n")
-        chunks = raw.split("\n\n")
-        items: list[dict] = []
-        for chunk in chunks:
-            chunk = chunk.strip()
-            if not chunk:
-                continue
+        decoder = _json.JSONDecoder()
+        idx = 0
+        text = raw.strip()
+        parsed_objects: list[dict] = []
+        parse_failures = 0
+
+        while idx < len(text):
+            # Skip whitespace / blank-line separators between objects
+            while idx < len(text) and text[idx] in " \t\r\n":
+                idx += 1
+            if idx >= len(text):
+                break
             try:
-                obj = _json.loads(chunk)
+                obj, end_idx = decoder.raw_decode(text, idx)
                 if isinstance(obj, dict):
-                    items.append(obj)
+                    parsed_objects.append(obj)
                 elif isinstance(obj, list):
-                    items.extend(obj)
-            except _json.JSONDecodeError:
-                logger.debug(
-                    "Failed to JSON-decode chunk in tool response: %s",
-                    chunk[:200],
+                    parsed_objects.extend(obj)
+                idx = end_idx
+            except _json.JSONDecodeError as exc:
+                parse_failures += 1
+                logger.warning(
+                    "Failed to decode JSON object at position %d: %s at "
+                    "line %d col %d. Context: %r",
+                    idx, exc.msg, exc.lineno, exc.colno,
+                    text[max(0, idx - 20):idx + 150],
                 )
-        return self._build_records(items)
+                # Recovery: search for next `{"request":` anchor after the
+                # failure point, which is a reliable per-record boundary
+                # regardless of what's broken inside the current object.
+                next_anchor = text.find('{"request":', idx + 1)
+                if next_anchor == -1:
+                    logger.warning(
+                        "Could not resynchronize after malformed object at "
+                        "position %d — %d objects recovered before giving up "
+                        "on the rest of this batch",
+                        idx, len(parsed_objects),
+                    )
+                    break
+                idx = next_anchor
+
+        if parse_failures:
+            logger.warning(
+                "%d of %d objects failed to parse this cycle (recovered %d)",
+                parse_failures, parse_failures + len(parsed_objects),
+                len(parsed_objects),
+            )
+
+        return self._build_records(parsed_objects), parse_failures
 
     @staticmethod
     def _build_records(items: list[dict]) -> list[RawBurpRecord]:

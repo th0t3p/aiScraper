@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ai_scraper.api.routes import router, health_router
-from ai_scraper.config import ApiConfig, get_config
+from ai_scraper.config import ApiConfig, apply_cli_overrides, get_config
 from ai_scraper.service import AiScraperService, init_service, shutdown_service
 
 logger = logging.getLogger(__name__)
@@ -90,12 +90,22 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
     return app
 
 
-def run_server() -> None:
-    """Entry point for `python -m ai_scraper.api.server`."""
+def run_server(cli_overrides=None) -> None:
+    """Entry point for `python -m ai_scraper.api.server`.
+
+    Parameters
+    ----------
+    cli_overrides:
+        An ``argparse.Namespace`` from ``_parse_args()``, or ``None``.
+        When provided, CLI values take precedence over .env-derived
+        config for this run only.
+    """
     import uvicorn
 
     _configure_logging()
     config = get_config()
+    if cli_overrides is not None:
+        apply_cli_overrides(config, cli_overrides)
     uvicorn.run(
         "ai_scraper.api.server:create_app",
         host=config.api.host,

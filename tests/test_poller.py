@@ -344,40 +344,40 @@ class TestPollerParseRecords:
             _make_raw(_request="GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n").model_dump(),
             _make_raw(_request="GET /b HTTP/1.1\r\nHost: b.com\r\n\r\n").model_dump(),
         ]
-        records = poller._parse_records(data)
+        records, _ = poller._parse_records(data)
         assert len(records) == 2
 
     def test_parse_dict_with_items_key(self):
         config = PollerConfig()
         poller = BurpPoller(config=config)
         data = {"items": [_make_raw(_request="GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n").model_dump()]}
-        records = poller._parse_records(data)
+        records, _ = poller._parse_records(data)
         assert len(records) == 1
 
     def test_parse_dict_with_entries_key(self):
         config = PollerConfig()
         poller = BurpPoller(config=config)
         data = {"entries": [_make_raw(_request="GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n").model_dump()]}
-        records = poller._parse_records(data)
+        records, _ = poller._parse_records(data)
         assert len(records) == 1
 
     def test_parse_single_record_dict(self):
         config = PollerConfig()
         poller = BurpPoller(config=config)
         data = _make_raw(_request="GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n").model_dump()
-        records = poller._parse_records(data)
+        records, _ = poller._parse_records(data)
         assert len(records) == 1
 
     def test_parse_none(self):
         config = PollerConfig()
         poller = BurpPoller(config=config)
-        records = poller._parse_records(None)
+        records, _ = poller._parse_records(None)
         assert records == []
 
     def test_parse_empty_list(self):
         config = PollerConfig()
         poller = BurpPoller(config=config)
-        records = poller._parse_records([])
+        records, _ = poller._parse_records([])
         assert records == []
 
     def test_parse_blank_line_separated_json_string(self):
@@ -395,7 +395,7 @@ class TestPollerParseRecords:
             + _json.dumps(rec2.model_dump()) + "\n\n"
         )
 
-        records = poller._parse_records(raw_str)
+        records, _ = poller._parse_records(raw_str)
         assert len(records) == 2
 
     def test_parse_blank_line_separated_json_with_crlf(self):
@@ -408,8 +408,43 @@ class TestPollerParseRecords:
         rec = _make_raw(_request="GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n")
         raw_str = _json.dumps(rec.model_dump()) + "\r\n\r\n"
 
-        records = poller._parse_records(raw_str)
+        records, _ = poller._parse_records(raw_str)
         assert len(records) == 1
+
+    def test_parse_malformed_object_with_embedded_newline(self):
+        """A malformed object containing an unescaped newline inside a JSON
+        string value (matching a confirmed Burp MCP serialization bug) must
+        not corrupt adjacent valid objects — only the malformed one is skipped
+        via the ``{"request":`` resynchronization recovery."""
+        import json as _json
+
+        config = PollerConfig()
+        poller = BurpPoller(config=config)
+
+        rec1 = _make_raw(_request="GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n")
+        rec3 = _make_raw(_request="GET /c HTTP/1.1\r\nHost: c.com\r\n\r\n")
+
+        # JSON with a literal unescaped newline inside a string value.
+        # \\r\\n → valid JSON escapes (CR+LF); \\n alone → real LF that
+        # breaks the JSON string (invalid control character).
+        malformed = (
+            '{"request": "GET /b HTTP/1.1\\r\\nHost: b.com\\r\\n\\r\\n", '
+            '"response": "bogus\nunescaped newline", "notes": ""}'
+        )
+
+        raw_str = (
+            _json.dumps(rec1.model_dump()) + "\n\n"
+            + malformed + "\n\n"
+            + _json.dumps(rec3.model_dump()) + "\n\n"
+        )
+
+        records, failures = poller._parse_records(raw_str)
+        assert len(records) == 2, (
+            f"Expected 2 valid records recovered, got {len(records)}"
+        )
+        assert failures == 1, (
+            f"Expected 1 parse failure, got {failures}"
+        )
 
 
 class TestCursorAdvancementWithFilters:

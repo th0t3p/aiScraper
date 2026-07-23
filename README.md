@@ -162,6 +162,12 @@ docker compose up -d
 # Start aiScraper
 source .venv/bin/activate
 python -m ai_scraper
+
+# Use a non-default MCP backend (one-shot override, no .env changes needed)
+python -m ai_scraper --mcp-backend burpmcp_ultra --mcp-auth-token <token>
+
+# Override the MCP server URL for this run only
+python -m ai_scraper --mcp-sse-url http://192.168.1.50:9876
 ```
 
 The poller connects directly to Burp's MCP Server at `127.0.0.1:9876`.
