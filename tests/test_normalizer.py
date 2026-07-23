@@ -293,3 +293,102 @@ class TestParamNamesJsonBody:
         assert "token" in names
         assert "user" in names
         assert "role" in names
+
+
+class TestNormalizeWithStructuredFields:
+    """Tests confirming that BurpMCP-Ultra's structured fields take
+    precedence over regex parsing, while official-server records fall
+    back to the existing regex path unchanged."""
+
+    def test_burpmcp_ultra_structured_fields_used_directly(self):
+        """A realistic BurpMCP-Ultra item with all structured fields
+        populated must produce correct method, status_code, host, path
+        directly from those fields — not 'UNKNOWN'/None."""
+        raw = RawBurpRecord(
+            request="GET /test HTTP/1.1\r\nHost: ultra.example.com\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\n\r\n",
+            host="ultra.example.com",
+            port=443,
+            secure=True,
+            method="POST",          # structured override — different from raw
+            url="https://ultra.example.com/structured/path?q=1",
+            path="/structured/path",
+            status_code=302,         # structured override — different from response
+            request_headers=[
+                {"name": "Host", "value": "ultra.example.com"},
+                {"name": "Authorization", "value": "Bearer ultra-token"},
+            ],
+        )
+
+        norm = Normalizer()
+        result = norm.normalize(raw)
+
+        # Structured fields must win over regex-parsed values
+        assert result.method == "POST", (
+            f"Expected structured method 'POST', got {result.method!r}"
+        )
+        assert result.host == "ultra.example.com"
+        assert result.path == "/structured/path"
+        assert result.url == "https://ultra.example.com/structured/path?q=1"
+        assert result.response_status == 302, (
+            f"Expected structured status_code 302, got {result.response_status}"
+        )
+
+        # Headers from request_headers list must be converted
+        assert result.headers["Host"] == "ultra.example.com"
+        assert result.headers["Authorization"] == "Bearer ultra-token"
+
+    def test_burpmcp_ultra_secure_false_uses_http(self):
+        """raw.secure=False must produce http:// URL."""
+        raw = RawBurpRecord(
+            request="GET / HTTP/1.1\r\nHost: insecure.com\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\n\r\n",
+            host="insecure.com",
+            secure=False,
+            method="GET",
+            path="/",
+        )
+
+        norm = Normalizer()
+        result = norm.normalize(raw)
+        assert result.url == "http://insecure.com/"
+
+    def test_burpmcp_ultra_non_standard_port_in_url(self):
+        """raw.port=8080 should appear in the constructed URL when
+        raw.url is not provided."""
+        raw = RawBurpRecord(
+            request="GET /test HTTP/1.1\r\nHost: srv:8080\r\n\r\n",
+            response="HTTP/1.1 200 OK\r\n\r\n",
+            host="srv",
+            port=8080,
+            secure=True,
+            method="GET",
+            path="/test",
+        )
+
+        norm = Normalizer()
+        result = norm.normalize(raw)
+        assert result.url == "https://srv:8080/test"
+
+    def test_official_server_regex_path_unchanged(self, sample_raw_record):
+        """An official-PortSwigger-shaped item (only request/response/notes)
+        must still parse via the existing regex path with no regression."""
+        norm = Normalizer()
+        result = norm.normalize(sample_raw_record)
+
+        # All fields should be parsed from raw HTTP text as before
+        assert result.method == "GET"
+        assert result.host == "api.example.com"
+        assert result.path == "/users/123/orders"
+        assert result.response_status == 200
+        assert result.headers["authorization"] == "Bearer eyJxxx"
+
+    def test_no_request_headers_falls_back_to_parsed(self, sample_raw_record):
+        """When request_headers is None, headers must come from regex
+        parsing (existing behaviour)."""
+        norm = Normalizer()
+        result = norm.normalize(sample_raw_record)
+
+        assert "host" in result.headers
+        assert "authorization" in result.headers
+        assert "content-type" in result.headers

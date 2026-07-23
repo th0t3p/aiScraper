@@ -239,6 +239,27 @@ class PostgresStorage:
     # ── Internal helpers ─────────────────────────────────────────────────────
 
     @staticmethod
+    def _decode_json_field(value):
+        """Decode a JSONB column that asyncpg returned as a raw string.
+
+        Without a ``set_type_codec`` registration on the pool, asyncpg
+        returns JSONB columns as plain ``str`` (the JSON text), not as
+        already-deserialized Python objects.  This helper handles all
+        three cases:
+
+        * ``None`` → ``None`` (NULL column, e.g. response_headers when
+          there was no response).
+        * already a dict / list → returned as-is (defensive, in case a
+          codec is added later).
+        * raw ``str`` → ``json.loads(value)``.
+        """
+        if value is None:
+            return None
+        if isinstance(value, (dict, list)):
+            return value
+        return json.loads(value)
+
+    @staticmethod
     def _record_to_params(record: TrafficRecord) -> list[Any]:
         return [
             record.request_id,
@@ -260,20 +281,23 @@ class PostgresStorage:
     @staticmethod
     def _row_to_record(row: asyncpg.Record) -> TrafficRecord:
         d = dict(row)
-        # asyncpg returns JSONB columns as already-deserialized Python objects
+        # asyncpg returns JSONB columns as raw JSON text strings unless a
+        # type codec is explicitly registered on the pool (_decode_json_field
+        # handles decoding; the dict/list isinstance check is defensive in
+        # case a codec gets added later).
         return TrafficRecord(
             request_id=d["request_id"],
             method=d["method"],
             url=d["url"],
             host=d["host"],
             path=d["path"],
-            query_params=d.get("query_params") or {},
-            headers=d.get("headers") or {},
+            query_params=PostgresStorage._decode_json_field(d.get("query_params")) or {},
+            headers=PostgresStorage._decode_json_field(d.get("headers")) or {},
             body=d.get("body"),
             response_status=d.get("response_status"),
-            response_headers=d.get("response_headers") or {},
+            response_headers=PostgresStorage._decode_json_field(d.get("response_headers")) or {},
             response_body=d.get("response_body"),
             timestamp=d["timestamp"],
             source_tool=d.get("source_tool", "burp"),
-            tags=d.get("tags") or {},
+            tags=PostgresStorage._decode_json_field(d.get("tags")) or {},
         )

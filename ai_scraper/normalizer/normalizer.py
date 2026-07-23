@@ -40,24 +40,61 @@ class Normalizer:
     # ── Public API ───────────────────────────────────────────────────────────
 
     def normalize(self, raw: RawBurpRecord) -> TrafficRecord:
-        """Convert a single raw Burp record into the unified schema."""
-        # Parse the raw request blob
-        parsed = self._parse_http_request(raw.request)
+        """Convert a single raw Burp record into the unified schema.
 
-        # Parse the raw response blob (if present)
-        resp_parsed = self._parse_http_response(raw.response) if raw.response else {}
+        When structured fields (host, method, path, status_code, etc.) are
+        present on the raw record (BurpMCP-Ultra backend), they are used
+        directly.  Otherwise the existing regex-based parsing of the raw
+        HTTP text blobs applies unchanged (official PortSwigger server).
+        """
+        # Parse raw HTTP text blobs (only when available — BurpMCP-Ultra
+        # always includes these when include_request/include_response are
+        # set, but we defend against a missing blob regardless).
+        parsed = self._parse_http_request(raw.request) if raw.request else {}
+        resp_parsed = (
+            self._parse_http_response(raw.response) if raw.response else {}
+        )
 
-        # Build full URL
-        host = parsed.get("host", "unknown")
-        path = parsed.get("path", "/")
-        protocol = self._infer_protocol(parsed)
-        port = parsed.get("port")
-        full_url = f"{protocol}://{host}"
-        if port and port not in (80, 443):
-            full_url += f":{port}"
-        full_url += path
-        if parsed.get("query"):
-            full_url += "?" + parsed["query"]
+        # ── Prefer structured fields when available ────────────────────────
+        host = raw.host if raw.host is not None else parsed.get("host", "unknown")
+        method = raw.method if raw.method is not None else parsed.get("method", "UNKNOWN")
+        path = raw.path if raw.path is not None else parsed.get("path", "/")
+        port = raw.port if raw.port is not None else parsed.get("port")
+
+        # Protocol: use raw.secure when available, otherwise infer
+        if raw.secure is not None:
+            protocol = "https" if raw.secure else "http"
+        else:
+            protocol = self._infer_protocol(parsed)
+
+        # Full URL: use raw.url when available, otherwise construct
+        if raw.url is not None:
+            full_url = raw.url
+        else:
+            full_url = f"{protocol}://{host}"
+            if port and port not in (80, 443):
+                full_url += f":{port}"
+            full_url += path
+            if parsed.get("query"):
+                full_url += "?" + parsed["query"]
+
+        # Headers: convert BurpMCP-Ultra's request_headers list-of-dicts
+        # to the {name: value} dict shape, or fall back to regex-parsed
+        if raw.request_headers is not None:
+            headers = {
+                h["name"]: h["value"]
+                for h in raw.request_headers
+                if isinstance(h, dict) and "name" in h and "value" in h
+            }
+        else:
+            headers = parsed.get("headers", {})
+
+        query_params = parse_qs(parsed.get("query", ""), keep_blank_values=True)
+
+        response_status = (
+            raw.status_code if raw.status_code is not None
+            else resp_parsed.get("status_code")
+        )
 
         # Generate a synthetic request_id
         req_id = self._make_request_id(raw)
@@ -65,19 +102,16 @@ class Normalizer:
         # Timestamp: prefer response Date header, fallback to now
         timestamp = self._extract_timestamp(raw.response, resp_parsed)
 
-        headers = parsed.get("headers", {})
-        query_params = parse_qs(parsed.get("query", ""), keep_blank_values=True)
-
         return TrafficRecord(
             request_id=req_id,
-            method=parsed.get("method", "UNKNOWN"),
+            method=method,
             url=full_url,
             host=host,
             path=path,
             query_params=query_params,
             headers=headers,
             body=parsed.get("body"),
-            response_status=resp_parsed.get("status_code"),
+            response_status=response_status,
             response_headers=resp_parsed.get("headers") or {},
             response_body=resp_parsed.get("body"),
             timestamp=timestamp,
@@ -292,9 +326,15 @@ class Normalizer:
     def _make_request_id(raw: RawBurpRecord) -> str:
         """Generate a deterministic request_id from the raw record.
 
-        Since there's no structured id field, we hash the request body to
-        produce a stable identifier.
+        Prefers hashing the raw request text.  Falls back to hashing the
+        structured fields if the request blob is missing (defensive —
+        shouldn't happen with include_request=True, but guards against a
+        future misconfiguration).
         """
         import hashlib
-        h = hashlib.sha256(raw.request.encode("utf-8", errors="replace")).hexdigest()[:12]
+        payload = raw.request
+        if not payload:
+            # Fallback: hash whatever structured fields are available
+            payload = f"{raw.method}|{raw.host}|{raw.path}|{raw.url}"
+        h = hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()[:12]
         return f"burp:{h}"
