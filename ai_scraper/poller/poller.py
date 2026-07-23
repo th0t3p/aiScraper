@@ -247,8 +247,20 @@ class BurpPoller:
         error = None
 
         for attempt in range(3):
-            tool_args = {"count": count, "offset": offset}
-            logger.debug("Calling %s with args=%s (attempt %d)", self._tool_name, tool_args, attempt + 1)
+            # Build tool args based on the MCP backend implementation.
+            # BurpMCP-Ultra uses start_index/include_request/include_response
+            # instead of offset; the official server uses count/offset.
+            if self._config.mcp_backend == "burpmcp_ultra":
+                tool_args: dict[str, object] = {
+                    "start_index": offset,
+                    "count": count,
+                    "include_request": True,
+                    "include_response": True,
+                }
+            else:
+                tool_args = {"count": count, "offset": offset}
+            logger.debug("Calling %s with args=%s (attempt %d)",
+                         self._tool_name, tool_args, attempt + 1)
             try:
                 raw_data = await self._client.call_tool(
                     self._tool_name, tool_args
@@ -271,7 +283,20 @@ class BurpPoller:
                 raise error
             return []
 
-        # 2. Parse into RawBurpRecord list
+        # 2. Parse into RawBurpRecord list.
+        #    Capture raw item count before parsing for accurate log messages
+        #    and cursor advancement.  BurpMCP-Ultra returns a dict with an
+        #    explicit "items" key; the official server returns a list or
+        #    blank-line-separated string.
+        raw_item_count = 0
+        if isinstance(raw_data, dict):
+            raw_item_count = len(raw_data.get("items")
+                                 or raw_data.get("entries")
+                                 or raw_data.get("history")
+                                 or [])
+        elif isinstance(raw_data, list):
+            raw_item_count = len(raw_data)
+
         records, failed_chunks = self._parse_records(raw_data)
         returned_count = len(records)
 
@@ -279,19 +304,36 @@ class BurpPoller:
         #    An empty batch at a valid offset just means we're caught up.
         self._state.last_poll_at = datetime.now(timezone.utc)
 
-        # 4. Handle "caught up" / "history possibly cleared" cases
+        # 4. Handle "caught up" / "history possibly cleared" / "all failed
+        #    to parse" — with distinct messages for each case.
         if returned_count == 0 and offset > 0:
-            # Could be caught up, or Burp history was cleared entirely
-            # while we still hold a high offset.  Reset as a recovery.
-            logger.warning(
-                "Offset %d returned 0 records — history may have been cleared. "
-                "Resetting consumed_count to 0.",
-                offset,
-            )
-            self._state.consumed_count = 0
-            self._state.total_polled = 0
+            if raw_item_count > 0 or failed_chunks > 0:
+                logger.warning(
+                    "All %d raw items in this batch failed to parse at "
+                    "offset %d — check earlier 'Failed to parse raw "
+                    "record' warnings above",
+                    raw_item_count or failed_chunks, offset,
+                )
+            else:
+                # Could be caught up, or Burp history was cleared entirely
+                # while we still hold a high offset.  Reset as a recovery.
+                logger.warning(
+                    "Offset %d returned 0 records — history may have been "
+                    "cleared. Resetting consumed_count to 0.",
+                    offset,
+                )
+                self._state.consumed_count = 0
+                self._state.total_polled = 0
         elif returned_count == 0:
-            logger.debug("No records at offset 0 — Burp history is empty")
+            if raw_item_count > 0 or failed_chunks > 0:
+                logger.warning(
+                    "All %d raw items in this batch failed to parse — "
+                    "check earlier 'Failed to parse raw record' warnings "
+                    "above",
+                    raw_item_count or failed_chunks,
+                )
+            else:
+                logger.debug("No records at offset 0 — Burp history is empty")
             return []
         elif returned_count < count:
             # Fewer than requested = we've reached the current end of history
@@ -303,10 +345,12 @@ class BurpPoller:
         if returned_count == 0:
             return []
 
-        # 5. Advance cursor by actual returned count (BEFORE filtering —
-        #    see next step for rationale).
-        self._state.consumed_count += returned_count
-        self._state.total_polled += returned_count
+        # 5. Advance cursor.  Prefer raw_item_count (what the server
+        #    actually returned) over returned_count (what we successfully
+        #    parsed) so we don't re-fetch items that failed validation.
+        cursor_advance = raw_item_count if raw_item_count > 0 else returned_count
+        self._state.consumed_count += cursor_advance
+        self._state.total_polled += cursor_advance
 
         # 6. Apply URL regex and authorized-scope filters.
         #    Filters run POST-cursor-advance to prevent the poller from
@@ -365,7 +409,8 @@ class BurpPoller:
         else:
             return [], 0
 
-        return self._build_records(items), 0
+        records, build_failures = self._build_records(items)
+        return records, build_failures
 
     def _parse_records_from_string(self, raw: str) -> tuple[list[RawBurpRecord], int]:
         """Parse a string of whitespace-separated JSON objects.
@@ -425,17 +470,20 @@ class BurpPoller:
                 len(parsed_objects),
             )
 
-        return self._build_records(parsed_objects), parse_failures
+        records, build_failures = self._build_records(parsed_objects)
+        return records, parse_failures + build_failures
 
     @staticmethod
-    def _build_records(items: list[dict]) -> list[RawBurpRecord]:
+    def _build_records(items: list[dict]) -> tuple[list[RawBurpRecord], int]:
         records: list[RawBurpRecord] = []
+        build_failures = 0
         for item in items:
             try:
                 records.append(RawBurpRecord(**item))
             except Exception:
+                build_failures += 1
                 logger.debug("Failed to parse raw record: %s", str(item)[:200])
-        return records
+        return records, build_failures
 
     # ── URL filtering ────────────────────────────────────────────────────────
 

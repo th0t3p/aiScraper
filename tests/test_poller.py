@@ -447,6 +447,134 @@ class TestPollerParseRecords:
         )
 
 
+class TestBurpMcpUltraBackend:
+    """Tests specific to the BurpMCP-Ultra backend's tool args and response shape."""
+
+    @pytest.mark.asyncio
+    async def test_tool_args_use_start_index_and_include_flags(self):
+        """BurpMCP-Ultra must send start_index (not offset) and explicitly
+        request include_request/include_response=true."""
+        raw = _make_raw(_request=_make_raw_request(host="a.com", path="/a"))
+        fake = FakeMcpClient(tool_responses={
+            "proxy_history": {"items": [raw.model_dump()]},
+        })
+
+        config = PollerConfig(
+            mcp_backend="burpmcp_ultra",
+            proxy_history_tool="proxy_history",
+            allow_unscoped=True,
+        )
+        poller = BurpPoller(config=config, mcp_client=fake)
+        poller._discovered_tool = "proxy_history"  # skip discovery
+
+        await poller.poll_once()
+
+        assert len(fake.calls) == 1
+        assert fake.calls[0][0] == "proxy_history"
+        assert fake.calls[0][1] == {
+            "start_index": 0,
+            "count": 50,
+            "include_request": True,
+            "include_response": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_start_index_advances_across_cycles(self):
+        """start_index must advance after each poll cycle (the core fix for
+        the 'stuck-at-0' bug)."""
+        raw = _make_raw(_request=_make_raw_request(host="b.com", path="/b"))
+        fake = FakeMcpClient(tool_responses={
+            "proxy_history": {"items": [raw.model_dump()]},
+        })
+
+        config = PollerConfig(
+            mcp_backend="burpmcp_ultra",
+            proxy_history_tool="proxy_history",
+            allow_unscoped=True,
+            batch_size=10,
+        )
+        poller = BurpPoller(config=config, mcp_client=fake)
+        poller._discovered_tool = "proxy_history"
+
+        # First poll: start_index=0
+        await poller.poll_once()
+        assert fake.calls[0][1]["start_index"] == 0
+
+        # Second poll: start_index should be 1
+        await poller.poll_once()
+        assert fake.calls[1][1]["start_index"] == 1
+
+    def test_parse_burpmcp_ultra_dict_response(self):
+        """BurpMCP-Ultra returns a single dict {"items": [...], ...} — not
+        a blank-line-separated string.  The dict path in _parse_records
+        must handle this correctly."""
+        import json as _json
+
+        config = PollerConfig(mcp_backend="burpmcp_ultra")
+        poller = BurpPoller(config=config)
+
+        rec = _make_raw(_request="GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n")
+        response_dict = {
+            "total_filtered": 100,
+            "start_index": 0,
+            "returned": 1,
+            "items": [rec.model_dump()],
+        }
+
+        records, failures = poller._parse_records(response_dict)
+        assert len(records) == 1
+        assert failures == 0
+        assert records[0].request == rec.request
+        assert records[0].response == rec.response
+
+    def test_parse_burpmcp_ultra_items_with_request_and_response(self):
+        """Items returned by BurpMCP-Ultra (with include_request/include_response
+        set) must contain 'request' and 'response' fields — confirm they parse
+        into valid RawBurpRecord objects."""
+        config = PollerConfig(mcp_backend="burpmcp_ultra")
+        poller = BurpPoller(config=config)
+
+        response_dict = {
+            "items": [
+                {
+                    "request": "GET /x HTTP/1.1\r\nHost: x.com\r\n\r\n",
+                    "response": "HTTP/1.1 200 OK\r\n\r\nok",
+                },
+                {
+                    "request": "POST /y HTTP/1.1\r\nHost: y.com\r\n\r\nbody",
+                    "response": None,
+                },
+            ],
+        }
+
+        records, failures = poller._parse_records(response_dict)
+        assert len(records) == 2
+        assert failures == 0
+        assert records[0].request.startswith("GET /x")
+        assert records[0].response == "HTTP/1.1 200 OK\r\n\r\nok"
+        assert records[1].request.startswith("POST /y")
+        assert records[1].response is None
+
+    def test_all_records_failed_to_parse_log_message(self, caplog):
+        """When the raw response has items but every single one fails
+        RawBurpRecord validation, the log message must say 'failed to parse',
+        not 'Burp history is empty'."""
+        config = PollerConfig(mcp_backend="burpmcp_ultra")
+        poller = BurpPoller(config=config)
+
+        # Items missing the required 'request' field — will fail validation.
+        response_dict = {
+            "items": [
+                {"bad_key": "no_request_field"},
+                {"also_bad": "still_no_request"},
+            ],
+        }
+
+        records, failures = poller._parse_records(response_dict)
+        assert len(records) == 0
+        assert failures == 2
+
+
 class TestCursorAdvancementWithFilters:
     """Regression: cursor must advance even when url/scope filters drop all records."""
 
