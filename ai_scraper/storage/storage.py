@@ -213,6 +213,11 @@ class PostgresStorage:
                 "SELECT tags->>'content_type_category' as ct, COUNT(*) as cnt "
                 "FROM traffic_log GROUP BY ct ORDER BY cnt DESC"
             )
+            response_ct_rows = await conn.fetch(
+                "SELECT tags->>'response_content_type_category' as ct, "
+                "COUNT(*) as cnt "
+                "FROM traffic_log GROUP BY ct ORDER BY cnt DESC"
+            )
             param_rows = await conn.fetch(
                 "SELECT kv.value as cat, COUNT(*) as cnt "
                 "FROM traffic_log, jsonb_each_text(tags->'param_categories') AS kv "
@@ -231,6 +236,7 @@ class PostgresStorage:
             hosts=[{"host": r["host"], "count": r["cnt"]} for r in host_rows],
             method_distribution={r["method"]: r["cnt"] for r in method_rows},
             content_type_distribution={r["ct"] or "unknown": r["cnt"] for r in ct_rows},
+            response_content_type_distribution={r["ct"] or "unknown": r["cnt"] for r in response_ct_rows},
             param_category_distribution={r["cat"]: r["cnt"] for r in param_rows},
             authenticated_count=auth_count,
             latest_timestamp=latest,

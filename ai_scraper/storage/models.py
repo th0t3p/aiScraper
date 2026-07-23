@@ -37,7 +37,8 @@ class TrafficStats(BaseModel):
     total_hosts: int
     hosts: list[dict[str, Any]]          # [{host, count}, ...]
     method_distribution: dict[str, int]
-    content_type_distribution: dict[str, int]
+    content_type_distribution: dict[str, int]                # request side
+    response_content_type_distribution: dict[str, int]       # response side
     param_category_distribution: dict[str, int]
     authenticated_count: int
     latest_timestamp: Optional[datetime] = None

@@ -156,6 +156,7 @@ class TestStatsEndpoint:
             hosts=[{"host": "api.example.com", "count": 80}],
             method_distribution={"GET": 60, "POST": 40},
             content_type_distribution={"json": 70, "form": 30},
+            response_content_type_distribution={"json": 65, "html": 35},
             param_category_distribution={"identifier_like": 50, "url_like": 20},
             authenticated_count=45,
             latest_timestamp=datetime.now(timezone.utc),
